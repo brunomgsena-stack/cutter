@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Cutter - app icon. Play cortado na diagonal (20deg), ponta afastada no eixo do corte.
+     Geometria em unidades 0-100, escalada pro grid de icone do macOS (corpo 824px em canvas 1024). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- Lado da ponta: semiplano a direita da linha de corte (79.2,0)-(42.8,100) -->
+    <clipPath id="tip">
+      <path d="M79.2 0 L100 0 L100 100 L42.8 100 Z"/>
+    </clipPath>
+    <mask id="body" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+      <rect width="100" height="100" fill="#fff"/>
+      <path d="M79.2 0 L100 0 L100 100 L42.8 100 Z" fill="#000"/>
+    </mask>
+    <!-- Play com cantos arredondados, centrado pelo centroide -->
+    <path id="tri" d="M37 26 L37 74 L78 50 Z" fill="#fff" stroke="#fff" stroke-width="7" stroke-linejoin="round"/>
+  </defs>
+
+  <g transform="translate(100 100) scale(8.24)">
+    <!-- Squircle (curva continua estilo macOS) -->
+    <path d="M50 0 C88 0 100 12 100 50 C100 88 88 100 50 100 C12 100 0 88 0 50 C0 12 12 0 50 0Z" fill="#E8383D"/>
+    <!-- Parte que fica -->
+    <g transform="translate(-1.4 -0.5)" mask="url(#body)">
+      <use href="#tri"/>
+    </g>
+    <!-- Ponta que sai (deslocada perpendicular ao corte) -->
+    <g transform="translate(3.3 1.2)" clip-path="url(#tip)">
+      <use href="#tri"/>
+    </g>
+  </g>
+</svg>

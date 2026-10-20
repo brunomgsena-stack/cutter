@@ -1,0 +1,19 @@
+# build
+build/
+
+# arquivos temporarios de download/gravacao
+.tmp_*
+*.part
+*_gravando.ts
+
+# macOS / editores
+.DS_Store
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+
+# nunca versionar configuracao local ou cookies
+config.json
+*.cookies
+cookies.txt

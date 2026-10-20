@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cutter</title>
+<style>
+  :root {
+    --bg: #0e0e10;
+    --glass: rgba(255, 255, 255, 0.06);
+    --glass-strong: rgba(255, 255, 255, 0.10);
+    --glass-border: rgba(255, 255, 255, 0.10);
+    --well: rgba(0, 0, 0, 0.28);
+    --text: #f5f5f7;
+    --dim: rgba(235, 235, 245, 0.60);
+    --faint: rgba(235, 235, 245, 0.30);
+    --red: #e8383d;
+    --ok: #30d158;
+    --radius-xl: 28px;
+    --radius-l: 18px;
+    --radius-m: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; min-height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-size: 15px; line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Fundo ambiente: thumbnail desfocada (como o Apple TV) + brilhos cinza */
+  .ambient {
+    position: fixed; inset: -10%; z-index: 0; pointer-events: none;
+    background:
+      radial-gradient(60% 50% at 20% 10%, rgba(120, 120, 135, 0.35), transparent 70%),
+      radial-gradient(50% 50% at 85% 90%, rgba(90, 90, 100, 0.30), transparent 70%),
+      var(--bg);
+  }
+  .ambient .art {
+    position: absolute; inset: 0;
+    background-size: cover; background-position: center;
+    filter: blur(80px) saturate(140%) brightness(0.55);
+    opacity: 0; transform: scale(1.1);
+    transition: opacity 1.2s ease;
+  }
+  .ambient .art.show { opacity: 1; }
+  .ambient::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(14,14,16,0.2), rgba(14,14,16,0.75));
+  }
+
+  .wrap { position: relative; z-index: 1; max-width: 620px; margin: 0 auto; padding: 56px 20px 40px; }
+
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
+  header svg { width: 44px; height: 44px; flex: none; filter: drop-shadow(0 6px 18px rgba(232,56,61,0.35)); }
+  header h1 {
+    margin: 0; font-family: -apple-system, "SF Pro Display", sans-serif;
+    font-size: 30px; font-weight: 700; letter-spacing: -0.02em;
+  }
+  header .sub { color: var(--dim); font-size: 13px; margin-top: 1px; }
+
+  .glass {
+    background: var(--glass);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-xl);
+    backdrop-filter: blur(40px) saturate(170%);
+    -webkit-backdrop-filter: blur(40px) saturate(170%);
+    box-shadow: 0 30px 80px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.08);
+  }
+  .card { padding: 22px; }
+
+  label { display: block; font-size: 12px; font-weight: 500; color: var(--dim); margin: 0 0 7px 4px; letter-spacing: 0.01em; }
+
+  input[type="text"], input[type="url"], select {
+    width: 100%; padding: 13px 16px;
+    background: var(--well); color: var(--text);
+    border: 1px solid rgba(255,255,255,0.06); border-radius: var(--radius-m);
+    font-size: 15px; font-family: inherit; outline: none;
+    transition: border-color .2s, background .2s, box-shadow .2s;
+  }
+  input::placeholder { color: var(--faint); }
+  input:focus, select:focus {
+    border-color: rgba(255,255,255,0.28);
+    background: rgba(0,0,0,0.38);
+    box-shadow: 0 0 0 4px rgba(255,255,255,0.06);
+  }
+  input.time { font-family: "SF Mono", ui-monospace, monospace; letter-spacing: 1px; text-align: center; }
+  select {
+    appearance: none; -webkit-appearance: none; cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' stroke='%23aaa' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 16px center;
+  }
+
+  .msg { margin: 10px 4px 0; font-size: 13px; color: var(--dim); min-height: 18px; }
+  .msg.err { color: #ff8a8a; white-space: pre-wrap; }
+
+  /* Preview */
+  .preview { display: none; margin-top: 18px; animation: rise .45s cubic-bezier(.2,.8,.2,1); }
+  .preview.show { display: block; }
+  .thumb {
+    position: relative; aspect-ratio: 16 / 9; border-radius: var(--radius-l); overflow: hidden;
+    background: rgba(255,255,255,0.04) center / cover no-repeat;
+    box-shadow: 0 18px 40px rgba(0,0,0,0.45);
+  }
+  .thumb::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(180deg, transparent 35%, rgba(0,0,0,0.55) 65%, rgba(0,0,0,0.85));
+  }
+  .thumb .over { position: absolute; left: 18px; right: 18px; bottom: 14px; z-index: 1; }
+  .thumb .title {
+    font-family: -apple-system, "SF Pro Display", sans-serif;
+    font-size: 19px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.25;
+    text-shadow: 0 1px 12px rgba(0,0,0,0.5);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .thumb .channel { font-size: 13px; color: rgba(255,255,255,0.7); margin-top: 2px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .chip {
+    font-size: 12px; font-weight: 500; padding: 4px 10px; border-radius: 999px;
+    background: var(--glass-strong); color: var(--dim); border: 1px solid var(--glass-border);
+  }
+  .chip.live { background: rgba(232,56,61,0.18); color: #ff8f8f; border-color: rgba(232,56,61,0.35); }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--red); margin-right: 6px; vertical-align: 1px; animation: blink 1.4s infinite; }
+
+  .controls { display: none; }
+  .controls.show { display: block; animation: rise .45s cubic-bezier(.2,.8,.2,1); }
+
+  /* Segmented control de vidro */
+  .seg {
+    position: relative; display: grid; grid-template-columns: 1fr 1fr;
+    margin-top: 18px; padding: 4px; border-radius: 999px;
+    background: var(--well); border: 1px solid rgba(255,255,255,0.06);
+  }
+  .seg .knob {
+    position: absolute; top: 4px; bottom: 4px; left: 4px; width: calc(50% - 4px);
+    border-radius: 999px; background: rgba(255,255,255,0.14);
+    box-shadow: 0 4px 14px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.15);
+    transition: transform .35s cubic-bezier(.3,.9,.3,1);
+  }
+  .seg.right .knob { transform: translateX(100%); }
+  .seg button {
+    position: relative; z-index: 1; border: 0; background: transparent; cursor: pointer;
+    padding: 9px 12px; font-family: inherit; font-size: 14px; font-weight: 500; color: var(--dim);
+    transition: color .25s;
+  }
+  .seg button.on { color: var(--text); }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+  .field { margin-top: 16px; }
+
+  .helper { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: var(--dim); }
+  .helper button {
+    border: 1px solid var(--glass-border); background: var(--glass); color: var(--dim);
+    border-radius: 999px; padding: 4px 11px; font-family: inherit; font-size: 12px; font-weight: 500; cursor: pointer;
+    transition: background .2s, color .2s;
+  }
+  .helper button:hover { background: var(--glass-strong); color: var(--text); }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pills button {
+    flex: 1 1 auto; border: 1px solid rgba(255,255,255,0.06); background: var(--well); color: var(--dim);
+    border-radius: 999px; padding: 9px 12px; font-family: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
+    font-variant-numeric: tabular-nums; transition: background .2s, color .2s, box-shadow .2s;
+  }
+  .pills button:hover { color: var(--text); }
+  .pills button.on {
+    background: rgba(255,255,255,0.14); color: var(--text);
+    box-shadow: 0 4px 14px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.15);
+  }
+  .hint { margin: 8px 4px 0; font-size: 12px; color: var(--faint); }
+
+  /* Botoes estilo tvOS: primario branco */
+  .btn {
+    display: block; width: 100%; margin-top: 20px; padding: 14px 18px;
+    border: 0; border-radius: 999px; cursor: pointer;
+    font-family: inherit; font-size: 15px; font-weight: 600; letter-spacing: -0.005em;
+    background: #f5f5f7; color: #111;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+    transition: transform .18s ease, background .2s, box-shadow .2s, opacity .2s;
+  }
+  .btn:hover:not(:disabled) { transform: scale(1.015); box-shadow: 0 14px 36px rgba(0,0,0,0.45); }
+  .btn:active:not(:disabled) { transform: scale(0.985); }
+  .btn:disabled { opacity: 0.35; cursor: default; }
+  .btn.ghost { background: var(--glass-strong); color: var(--text); border: 1px solid var(--glass-border); box-shadow: none; }
+  .btn.danger { background: var(--red); color: #fff; box-shadow: 0 10px 30px rgba(232,56,61,0.35); }
+  .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+  .btn-row .btn { margin-top: 0; }
+
+  /* Progresso */
+  .status { display: none; margin-top: 20px; }
+  .status.show { display: block; animation: rise .35s ease; }
+  .bar { height: 6px; border-radius: 999px; background: var(--well); overflow: hidden; }
+  .fill { height: 100%; width: 0%; border-radius: 999px; background: linear-gradient(90deg, #d8d8de, #ffffff); transition: width .4s ease; }
+  .bar.rec .fill { width: 100% !important; background: linear-gradient(90deg, rgba(232,56,61,0.2), var(--red), rgba(232,56,61,0.2)); background-size: 200% 100%; animation: sweep 2s linear infinite; }
+  .pct { margin: 10px 2px 0; font-size: 13px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .rec-line { display: flex; align-items: center; gap: 2px; font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; margin-bottom: 12px; }
+
+  .result { display: none; margin-top: 20px; padding: 18px; border-radius: var(--radius-l); background: var(--glass); border: 1px solid var(--glass-border); }
+  .result.show { display: block; animation: rise .35s ease; }
+  .result .ttl { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 4px; }
+  .result .path { color: var(--dim); font-size: 12px; font-family: "SF Mono", ui-monospace, monospace; word-break: break-all; }
+  .result.error { background: rgba(232,56,61,0.08); border-color: rgba(232,56,61,0.25); }
+  .result.error pre { margin: 6px 0 0; font-size: 12px; color: #ffb0b0; white-space: pre-wrap; font-family: "SF Mono", ui-monospace, monospace; }
+  .check { width: 20px; height: 20px; border-radius: 50%; background: var(--ok); display: inline-grid; place-items: center; flex: none; }
+
+  .settings { display: none; margin-top: 16px; }
+  .settings.show { display: block; animation: rise .35s ease; }
+  .settings h2 { margin: 0 0 4px; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+  .banner {
+    display: none; margin-bottom: 16px; padding: 12px 14px; border-radius: var(--radius-m);
+    background: rgba(255,159,10,0.12); border: 1px solid rgba(255,159,10,0.35); color: #ffd28a; font-size: 13px;
+  }
+  .banner.show { display: block; }
+  .banner code { font-family: "SF Mono", ui-monospace, monospace; background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 6px; }
+  footer { display: flex; justify-content: center; gap: 22px; margin-top: 22px; font-size: 13px; }
+  footer a { color: var(--faint); cursor: pointer; text-decoration: none; transition: color .2s; }
+  footer a:hover { color: var(--text); }
+
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--faint); border-top-color: var(--text); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; margin-right: 7px; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+  @keyframes sweep { to { background-position: -200% 0; } }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+  @media (max-width: 480px) {
+    .wrap { padding-top: 32px; }
+    .card { padding: 16px; }
+    .row { gap: 8px; }
+  }
+</style>
+</head>
+<body>
+<div class="ambient"><div class="art" id="art"></div></div>
+
+<div class="wrap">
+  <header>
+    <svg viewBox="0 0 100 100" aria-hidden="true">
+      <defs>
+        <clipPath id="hTip"><path d="M79.2 0 L100 0 L100 100 L42.8 100 Z"/></clipPath>
+        <mask id="hBody"><rect width="100" height="100" fill="#fff"/><path d="M79.2 0 L100 0 L100 100 L42.8 100 Z" fill="#000"/></mask>
+        <path id="hTri" d="M37 26 L37 74 L78 50 Z" fill="#fff" stroke="#fff" stroke-width="7" stroke-linejoin="round"/>
+      </defs>
+      <path d="M50 0 C88 0 100 12 100 50 C100 88 88 100 50 100 C12 100 0 88 0 50 C0 12 12 0 50 0Z" fill="#E8383D"/>
+      <g transform="translate(-1.4 -0.5)" mask="url(#hBody)"><use href="#hTri"/></g>
+      <g transform="translate(3.3 1.2)" clip-path="url(#hTip)"><use href="#hTri"/></g>
+    </svg>
+    <div>
+      <h1>Cutter</h1>
+      <div class="sub">Videos inteiros, trechos e lives ao vivo</div>
+    </div>
+  </header>
+
+  <div class="glass card">
+    <div class="banner" id="depBanner"></div>
+    <label for="url">Link do YouTube</label>
+    <input id="url" type="url" placeholder="Cole o link aqui" autocomplete="off" spellcheck="false">
+    <div class="msg" id="urlMsg"></div>
+
+    <div class="preview" id="preview">
+      <div class="thumb" id="thumb">
+        <div class="over">
+          <div class="title" id="pvTitle"></div>
+          <div class="channel" id="pvChannel"></div>
+        </div>
+      </div>
+      <div class="chips" id="pvChips"></div>
+    </div>
+
+    <div class="controls" id="controls">
+      <div class="seg" id="modeSeg">
+        <div class="knob"></div>
+        <button type="button" id="segA"></button>
+        <button type="button" id="segB"></button>
+      </div>
+
+      <div class="row" id="timeRow">
+        <div>
+          <label for="start">Inicio</label>
+          <input id="start" class="time" type="text" placeholder="00:00:00" maxlength="10" inputmode="numeric">
+        </div>
+        <div>
+          <label for="end">Fim</label>
+          <input id="end" class="time" type="text" placeholder="00:00:00" maxlength="10" inputmode="numeric">
+        </div>
+      </div>
+
+      <div class="helper" id="liveHelper">
+        Ultimos
+        <button type="button" data-mins="10">10 min</button>
+        <button type="button" data-mins="20">20 min</button>
+        <button type="button" data-mins="30">30 min</button>
+        <button type="button" data-mins="60">60 min</button>
+      </div>
+
+      <div class="field" id="backRow">
+        <label>Comecar de</label>
+        <div class="pills" id="backPills">
+          <button type="button" data-min="0">Agora</button>
+          <button type="button" data-min="5">&minus;5 min</button>
+          <button type="button" data-min="10">&minus;10 min</button>
+          <button type="button" data-min="30">&minus;30 min</button>
+          <button type="button" data-min="60">&minus;1 h</button>
+        </div>
+        <div class="hint" id="backHint"></div>
+      </div>
+
+      <div class="field">
+        <label for="quality">Qualidade maxima</label>
+        <select id="quality">
+          <option value="360">360p</option>
+          <option value="480">480p</option>
+          <option value="720" selected>720p</option>
+          <option value="1080">1080p</option>
+          <option value="1440">1440p</option>
+          <option value="2160">4K</option>
+          <option value="0">Melhor disponivel</option>
+        </select>
+      </div>
+
+      <button class="btn" id="go" disabled>Baixar</button>
+    </div>
+
+    <div class="status" id="status">
+      <div class="rec-line" id="recLine" style="display:none"><span class="dot"></span><span id="recText">Gravando</span></div>
+      <div class="bar" id="bar"><div class="fill" id="fill"></div></div>
+      <div class="pct" id="pct">Iniciando...</div>
+      <button class="btn danger" id="stopRec" style="display:none">Parar gravacao</button>
+    </div>
+
+    <div class="result" id="done">
+      <div class="ttl"><span class="check"><svg width="11" height="11" viewBox="0 0 12 12"><path d="M2.5 6.2l2.4 2.4 4.6-5" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span id="doneTitle">Pronto</span></div>
+      <div class="path" id="donePath"></div>
+      <div class="btn-row">
+        <button class="btn" id="openFile">Abrir video</button>
+        <button class="btn ghost" id="openFolder">Mostrar pasta</button>
+      </div>
+      <button class="btn ghost" id="newOne" style="margin-top:10px">Novo download</button>
+    </div>
+
+    <div class="result error" id="error">
+      <div class="ttl">Nao deu certo</div>
+      <pre id="errMsg"></pre>
+      <button class="btn ghost" id="retry" style="margin-top:14px">Tentar de novo</button>
+    </div>
+  </div>
+
+  <div class="glass card settings" id="settings">
+    <h2>Ajustes</h2>
+    <div class="field">
+      <label for="cfgDir">Salvar em</label>
+      <input id="cfgDir" type="text" spellcheck="false" placeholder="~/Downloads">
+    </div>
+    <div class="field">
+      <label for="cfgCookies">Cookies do navegador</label>
+      <select id="cfgCookies"></select>
+      <div class="hint">Use um navegador em que voce esteja logado no YouTube se aparecer "confirme que voce nao e um robo" ou para videos com restricao de idade.</div>
+    </div>
+    <div class="msg" id="cfgMsg"></div>
+    <div class="btn-row">
+      <button class="btn" id="cfgSave">Salvar</button>
+      <button class="btn ghost" id="cfgClose">Fechar</button>
+    </div>
+  </div>
+
+  <footer>
+    <a id="folderLink">Abrir pasta</a>
+    <a id="settingsLink">Ajustes</a>
+    <a id="quit">Encerrar</a>
+  </footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const urlEl = $("url"), startEl = $("start"), endEl = $("end"), qualityEl = $("quality");
+const urlMsg = $("urlMsg"), preview = $("preview"), thumb = $("thumb"), art = $("art");
+const pvTitle = $("pvTitle"), pvChannel = $("pvChannel"), pvChips = $("pvChips");
+const controls = $("controls"), modeSeg = $("modeSeg"), segA = $("segA"), segB = $("segB");
+const timeRow = $("timeRow"), liveHelper = $("liveHelper"), goBtn = $("go");
+const statusEl = $("status"), bar = $("bar"), fillEl = $("fill"), pctEl = $("pct");
+const recLine = $("recLine"), recText = $("recText"), stopBtn = $("stopRec");
+const doneEl = $("done"), doneTitle = $("doneTitle"), donePath = $("donePath");
+const errorEl = $("error"), errMsg = $("errMsg");
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (_) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} },
+};
+
+let currentInfo = null, currentJobId = null, polling = null, doneFilePath = null, infoFetchTimer = null;
+let modeVod = store.get("modeVod", "full");     // full | clip
+let modeLive = store.get("modeLive", "record"); // record | clip
+let backMin = parseInt(store.get("backMin", "0"), 10) || 0;
+const backRow = $("backRow"), backPills = $("backPills"), backHint = $("backHint");
+backPills.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+  backMin = parseInt(b.dataset.min, 10);
+  store.set("backMin", String(backMin));
+  applyMode();
+}));
+qualityEl.value = store.get("quality", "720");
+qualityEl.addEventListener("change", () => store.set("quality", qualityEl.value));
+
+const isLiveNow = () => !!currentInfo && (currentInfo.is_live || currentInfo.live_status === "is_live");
+const currentMode = () => isLiveNow() ? modeLive : modeVod;
+
+function applyMode() {
+  const live = isLiveNow();
+  const opts = live ? [["record", "Gravar ao vivo"], ["clip", "Trecho"]]
+                    : [["full", "Video inteiro"], ["clip", "Trecho"]];
+  const mode = currentMode();
+  [segA, segB].forEach((b, i) => {
+    b.dataset.mode = opts[i][0];
+    b.textContent = opts[i][1];
+    b.classList.toggle("on", opts[i][0] === mode);
+  });
+  modeSeg.classList.toggle("right", opts[1][0] === mode);
+  timeRow.style.display = mode === "clip" ? "grid" : "none";
+  liveHelper.style.display = live && mode === "clip" ? "flex" : "none";
+  backRow.style.display = mode === "record" ? "block" : "none";
+  backPills.querySelectorAll("button").forEach(b => b.classList.toggle("on", parseInt(b.dataset.min, 10) === backMin));
+  backHint.textContent = backMin
+    ? `Pega os ultimos ${backMin >= 60 ? backMin / 60 + " h" : backMin + " min"} e continua gravando ao vivo, sem emenda.`
+    : "Grava a partir de agora ate voce parar ou a live acabar.";
+  goBtn.textContent = { record: "Comecar a gravar", full: "Baixar video", clip: "Baixar trecho" }[mode];
+  setGoEnabled();
+}
+
+[segA, segB].forEach(b => b.addEventListener("click", () => {
+  if (isLiveNow()) { modeLive = b.dataset.mode; store.set("modeLive", modeLive); }
+  else { modeVod = b.dataset.mode; store.set("modeVod", modeVod); }
+  applyMode();
+}));
+
+function isValidTime(s) { return /^\d{1,4}:[0-5]\d:[0-5]\d$/.test((s || "").trim()); }
+
+function setGoEnabled() {
+  const needsTimes = currentMode() === "clip";
+  goBtn.disabled = !currentInfo || (needsTimes && !(isValidTime(startEl.value) && isValidTime(endEl.value)));
+}
+
+function autoFormatTime(el) {
+  const raw = el.value.replace(/\D/g, "").slice(0, 8);
+  if (raw.length <= 2) el.value = raw;
+  else if (raw.length <= 4) el.value = `${raw.slice(0, raw.length - 2)}:${raw.slice(-2)}`;
+  else el.value = `${raw.slice(0, raw.length - 4)}:${raw.slice(-4, -2)}:${raw.slice(-2)}`;
+}
+[startEl, endEl].forEach(el => el.addEventListener("input", () => { autoFormatTime(el); setGoEnabled(); }));
+
+function resetPreview() {
+  currentInfo = null;
+  preview.classList.remove("show");
+  controls.classList.remove("show");
+  art.classList.remove("show");
+}
+
+urlEl.addEventListener("input", () => {
+  clearTimeout(infoFetchTimer);
+  resetPreview();
+  urlMsg.textContent = ""; urlMsg.className = "msg";
+  const url = urlEl.value.trim();
+  if (!url) return;
+  if (!/youtu\.?be/i.test(url)) {
+    urlMsg.textContent = "Isso nao parece um link do YouTube.";
+    urlMsg.className = "msg err";
+    return;
+  }
+  infoFetchTimer = setTimeout(() => fetchInfo(url), 450);
+});
+
+async function fetchInfo(url) {
+  urlMsg.innerHTML = '<span class="spinner"></span>Buscando informacoes...';
+  urlMsg.className = "msg";
+  try {
+    const r = await fetch("/api/info", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "Falha ao buscar info");
+    if (urlEl.value.trim() !== url) return;
+    currentInfo = data;
+    renderPreview(data);
+    urlMsg.textContent = "";
+  } catch (e) {
+    resetPreview();
+    urlMsg.textContent = e.message;
+    urlMsg.className = "msg err";
+  }
+  setGoEnabled();
+}
+
+function chip(text, cls) {
+  const el = document.createElement("span");
+  el.className = "chip" + (cls ? " " + cls : "");
+  el.textContent = text;
+  return el;
+}
+
+function renderPreview(info) {
+  pvTitle.textContent = info.title || "(sem titulo)";
+  pvChannel.textContent = info.channel || "";
+  if (info.thumbnail) {
+    const u = `url("${info.thumbnail.replace(/"/g, "%22")}")`;
+    thumb.style.backgroundImage = u;
+    art.style.backgroundImage = u;
+    requestAnimationFrame(() => art.classList.add("show"));
+  } else {
+    thumb.style.backgroundImage = "";
+  }
+  pvChips.innerHTML = "";
+  if (isLiveNow()) {
+    const c = chip("AO VIVO", "live");
+    c.prepend(Object.assign(document.createElement("span"), { className: "dot" }));
+    pvChips.append(c);
+  } else if (info.live_status === "post_live") {
+    pvChips.append(chip("Live encerrada"));
+  }
+  if (info.duration_hms) pvChips.append(chip(info.duration_hms));
+  if (info.max_height) pvChips.append(chip(`ate ${info.max_height}p`));
+  preview.classList.add("show");
+  controls.classList.add("show");
+  applyMode();
+}
+
+liveHelper.querySelectorAll("button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    if (!currentInfo) return;
+    const releaseTs = parseInt(currentInfo.release_timestamp || "0", 10);
+    if (!releaseTs) {
+      urlMsg.textContent = "Nao foi possivel calcular (sem horario de inicio da live).";
+      urlMsg.className = "msg err";
+      return;
+    }
+    const elapsed = Math.floor(Date.now() / 1000) - releaseTs;
+    const endSec = Math.max(0, elapsed - 30);
+    startEl.value = fmtHMS(Math.max(0, endSec - parseInt(btn.dataset.mins, 10) * 60));
+    endEl.value = fmtHMS(endSec);
+    setGoEnabled();
+  });
+});
+
+function fmtHMS(n) {
+  n = Math.max(0, Math.floor(n));
+  const h = Math.floor(n / 3600), m = Math.floor((n % 3600) / 60), s = n % 60;
+  return [h, m, s].map(v => String(v).padStart(2, "0")).join(":");
+}
+
+function showOnly(el) {
+  [statusEl, doneEl, errorEl].forEach(x => x.classList.toggle("show", x === el));
+  controls.style.display = el ? "none" : "";
+}
+
+goBtn.addEventListener("click", async () => {
+  goBtn.disabled = true;
+  const mode = currentMode();
+  showOnly(statusEl);
+  bar.classList.toggle("rec", mode === "record");
+  recLine.style.display = mode === "record" ? "flex" : "none";
+  recText.textContent = "Conectando...";
+  stopBtn.style.display = "none";
+  fillEl.style.width = "0%";
+  pctEl.textContent = "Iniciando...";
+  try {
+    const r = await fetch("/api/download", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: urlEl.value.trim(), mode,
+        start: startEl.value.trim(), end: endEl.value.trim(),
+        quality: parseInt(qualityEl.value, 10), info: currentInfo,
+        back_min: mode === "record" ? backMin : 0,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "Falha");
+    currentJobId = data.job_id;
+    polling = setInterval(pollProgress, 700);
+  } catch (e) {
+    showError(e.message);
+  }
+});
+
+async function pollProgress() {
+  if (!currentJobId) return;
+  try {
+    const r = await fetch(`/api/progress/${currentJobId}`);
+    const data = await r.json();
+    if (data.recording && data.status === "running") {
+      const m = /Gravando\.\.\. (.+)/.exec(data.message || "");
+      recText.textContent = m ? `Gravando · ${m[1]}` : (data.message || "Gravando");
+      pctEl.textContent = data.stopping ? "Finalizando arquivo..." : "Continua ate voce parar ou a live acabar. O arquivo _gravando.ts na pasta de download ja pode ser aberto.";
+      stopBtn.style.display = data.stopping || !m ? "none" : "block";
+    } else {
+      const pct = Math.max(0, Math.min(100, data.progress || 0));
+      fillEl.style.width = pct + "%";
+      pctEl.textContent = data.message || "Processando...";
+    }
+    if (data.status === "done") {
+      stopPolling();
+      doneFilePath = data.file_path;
+      doneTitle.textContent = data.message && data.message !== "Pronto!" ? data.message : "Pronto";
+      donePath.textContent = data.file_path;
+      showOnly(doneEl);
+    } else if (data.status === "error") {
+      showError(data.error || "Erro desconhecido");
+    }
+  } catch (_) { /* erro transiente, continua */ }
+}
+
+function stopPolling() { if (polling) { clearInterval(polling); polling = null; } }
+
+function showError(msg) {
+  stopPolling();
+  errMsg.textContent = msg;
+  showOnly(errorEl);
+}
+
+stopBtn.addEventListener("click", async () => {
+  stopBtn.style.display = "none";
+  pctEl.textContent = "Finalizando arquivo...";
+  try { await fetch(`/api/stop/${currentJobId}`); } catch (_) {}
+});
+
+const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+$("openFile").addEventListener("click", () => doneFilePath && post("/api/open", { path: doneFilePath }));
+$("openFolder").addEventListener("click", () => post("/api/open-folder"));
+$("folderLink").addEventListener("click", () => post("/api/open-folder"));
+$("newOne").addEventListener("click", () => {
+  currentJobId = null; doneFilePath = null;
+  showOnly(null);
+  urlEl.value = ""; startEl.value = ""; endEl.value = "";
+  resetPreview();
+  urlEl.focus();
+});
+$("retry").addEventListener("click", () => { showOnly(null); setGoEnabled(); });
+$("quit").addEventListener("click", async () => {
+  if (!confirm("Encerrar o Cutter? Gravacoes em andamento serao salvas.")) return;
+  try { await fetch("/api/quit"); } catch (_) {}
+  document.body.innerHTML = '<div class="wrap"><header><div><h1>Encerrado</h1><div class="sub">Pode fechar esta aba.</div></div></header></div>';
+});
+
+const settingsEl = $("settings"), cfgDir = $("cfgDir"), cfgCookies = $("cfgCookies"), cfgMsg = $("cfgMsg");
+const BROWSER_NAMES = { "": "Nenhum", firefox: "Firefox", chrome: "Chrome", safari: "Safari", brave: "Brave",
+  edge: "Edge", chromium: "Chromium", opera: "Opera", vivaldi: "Vivaldi" };
+
+async function loadConfig() {
+  try {
+    const cfg = await (await fetch("/api/config")).json();
+    cfgDir.value = cfg.download_dir || "";
+    cfgCookies.innerHTML = "";
+    (cfg.browsers || [""]).forEach(b => cfgCookies.append(new Option(BROWSER_NAMES[b] || b, b)));
+    cfgCookies.value = cfg.cookies_browser || "";
+    const banner = $("depBanner");
+    if (cfg.missing && cfg.missing.length) {
+      banner.innerHTML = "";
+      banner.append(`Falta instalar: ${cfg.missing.join(", ")}. No Terminal: `);
+      banner.append(Object.assign(document.createElement("code"), { textContent: `brew install ${cfg.missing.join(" ")}` }));
+      banner.classList.add("show");
+    } else {
+      banner.classList.remove("show");
+    }
+  } catch (_) {}
+}
+
+$("settingsLink").addEventListener("click", () => {
+  cfgMsg.textContent = ""; cfgMsg.className = "msg";
+  settingsEl.classList.toggle("show");
+  if (settingsEl.classList.contains("show")) settingsEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+});
+$("cfgClose").addEventListener("click", () => settingsEl.classList.remove("show"));
+$("cfgSave").addEventListener("click", async () => {
+  try {
+    const r = await post("/api/config", { download_dir: cfgDir.value.trim(), cookies_browser: cfgCookies.value });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "Nao foi possivel salvar");
+    cfgDir.value = data.download_dir;
+    cfgMsg.textContent = "Salvo."; cfgMsg.className = "msg";
+  } catch (e) {
+    cfgMsg.textContent = e.message; cfgMsg.className = "msg err";
+  }
+});
+
+loadConfig();
+urlEl.focus();
+</script>
+</body>
+</html>
