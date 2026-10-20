@@ -5,7 +5,12 @@ cd "$(dirname "$0")/.."
 APP="build/Cutter.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-swiftc -O -o "$APP/Contents/MacOS/Cutter" mac/main.swift -framework AppKit -framework WebKit
+# binario universal (Apple Silicon + Intel)
+TMPBIN="$(mktemp -d)"
+for arch in arm64 x86_64; do
+  swiftc -O -target "$arch-apple-macos11.0" -o "$TMPBIN/Cutter-$arch" mac/main.swift -framework AppKit -framework WebKit
+done
+lipo -create "$TMPBIN/Cutter-arm64" "$TMPBIN/Cutter-x86_64" -output "$APP/Contents/MacOS/Cutter"
 cp mac/Info.plist "$APP/Contents/Info.plist"
 cp app.py index.html "$APP/Contents/Resources/"
 if command -v rsvg-convert >/dev/null && command -v iconutil >/dev/null; then
