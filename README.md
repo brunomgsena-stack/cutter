@@ -33,7 +33,7 @@ Opcional, para o ícone ser gerado a partir do `icon.svg` no build: `brew instal
 ## Instalação
 
 ```bash
-git clone <url-deste-repositorio> cutter
+git clone https://github.com/brunomgsena-stack/cutter.git
 cd cutter
 mac/build.sh --install
 ```
