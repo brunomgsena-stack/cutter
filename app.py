@@ -10,6 +10,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -49,6 +50,12 @@ def download_dir():
 
 def missing_dependencies():
     return [tool for tool in ("yt-dlp", "ffmpeg") if not shutil.which(tool)]
+
+
+def whisper_bin():
+    """whisper.cpp (brew install whisper-cpp). O app aberto pelo Finder nao herda o PATH do shell."""
+    return shutil.which("whisper-cli") or next(
+        (p for p in ("/opt/homebrew/bin/whisper-cli", "/usr/local/bin/whisper-cli") if os.path.exists(p)), None)
 PORT_START = 8765
 
 jobs = {}
@@ -93,8 +100,43 @@ def sanitize_filename(name):
 
 
 # Nao amarrar num cliente InnerTube so: Tenta o padrao do yt-dlp e, se falhar, cai pros alternativos.
+# (So vale pro YouTube; nos outros sites o yt-dlp roda uma vez, sem extractor-args.)
 CLIENTS = ["default", "web_embedded", "tv"]
 QUALITIES = {0, 360, 480, 720, 1080, 1440, 2160}
+
+YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+SITE_NAMES = {
+    "youtube.com": "YouTube", "youtu.be": "YouTube", "instagram.com": "Instagram",
+    "tiktok.com": "TikTok", "x.com": "X", "twitter.com": "X", "facebook.com": "Facebook",
+    "fb.watch": "Facebook", "vimeo.com": "Vimeo", "twitch.tv": "Twitch", "reddit.com": "Reddit",
+    "threads.net": "Threads", "threads.com": "Threads", "kwai.com": "Kwai", "dailymotion.com": "Dailymotion",
+}
+
+
+def normalize_url(url):
+    url = url.strip()
+    if url and not re.match(r"^[a-z][a-z0-9+.-]*://", url, re.IGNORECASE):
+        url = "https://" + url
+    return url
+
+
+def url_host(url):
+    host = (urlparse(normalize_url(url)).hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def is_youtube(url):
+    host = url_host(url)
+    return any(host == h or host.endswith("." + h) for h in YOUTUBE_HOSTS)
+
+
+def site_name(url):
+    host = url_host(url)
+    for domain, name in SITE_NAMES.items():
+        if host == domain or host.endswith("." + domain):
+            return name
+    return host or "o site"
+
 
 # Erros que nao mudam trocando de cliente - nao adianta tentar de novo.
 FATAL_PATTERNS = [
@@ -103,22 +145,46 @@ FATAL_PATTERNS = [
     "copyright claim",
 ]
 
-# stderr do yt-dlp -> mensagem que da pra entender. (padrao, mensagem)
+LOGIN_HINT = ("Em Ajustes > Cookies do navegador, escolha um navegador em que voce esteja logado no {site} "
+              "e tente de novo. Os cookies sao lidos so no seu Mac.")
+
+# stderr do yt-dlp -> mensagem que da pra entender. (padrao, mensagem, e_caso_de_login)
+# A ordem importa: falhas ao ler cookies vem antes do "pediu login" generico.
 FRIENDLY_ERRORS = [
-    (r"cookies are no longer valid|rotated in the browser|Sign in to confirm (you.re not a bot|your age)",
-     "O YouTube pediu login ou os cookies do navegador venceram.\n"
-     "Em Ajustes, escolha um navegador em que voce esteja logado no YouTube "
-     "(ou abra youtube.com nele e confira o login) e tente de novo."),
-    (r"could not find \w+ cookies|failed to load cookies|cookies database",
-     "Nao consegui ler os cookies do navegador escolhido em Ajustes. "
-     "Ele esta instalado e ja abriu o YouTube?"),
-    (r"Private video", "Video privado."),
-    (r"members-only|Join this channel", "Video exclusivo pra membros do canal."),
-    (r"This live event will begin", "A live ainda nao comecou."),
-    (r"HTTP Error 403", "O YouTube recusou o download (403). Tente de novo em alguns minutos."),
-    (r"HTTP Error 429|Too Many Requests", "Muitas requisicoes - o YouTube limitou. Espere uns minutos."),
-    (r"Video unavailable|video is unavailable", "Video indisponivel (removido, bloqueado na regiao ou sem permissao)."),
-    (r"Unsupported URL|is not a valid URL", "Link invalido ou nao suportado."),
+    (r"cookies are no longer valid|rotated in the browser",
+     "Os cookies do navegador venceram. Abra o {site} nesse navegador, confira o login e tente de novo.", True),
+    (r"could not find \w+ cookies|failed to load cookies|cookies database|failed to decrypt",
+     "Nao consegui ler os cookies do navegador escolhido em Ajustes. Ele esta instalado e ja abriu o {site}?", True),
+    (r"Operation not permitted.*[Cc]ookies|[Cc]ookies.*Operation not permitted|binarycookies",
+     "O macOS bloqueou a leitura dos cookies do Safari. De Acesso Total ao Disco para o Cutter "
+     "(Ajustes do Sistema > Privacidade e Seguranca) ou escolha outro navegador em Ajustes.", False),
+    (r"Sign in to confirm (you.re not a bot|your age)",
+     "O YouTube pediu login (\"confirme que voce nao e um robo\" ou restricao de idade).\n" + LOGIN_HINT, True),
+    (r"Private video", "Video privado.", False),
+    (r"members-only|Join this channel", "Video exclusivo pra membros do canal.", False),
+    (r"This live event will begin", "A live ainda nao comecou.", False),
+    (r"IP address is blocked",
+     "O {site} bloqueou este post para o seu IP ou regiao. As vezes funciona usando os cookies de um "
+     "navegador logado no {site} (Ajustes); senao, tente outra rede.", True),
+    (r"Cannot parse data",
+     "O {site} nao liberou este video sem login (comum no Facebook e em posts privados).\n" + LOGIN_HINT, True),
+    (r"log ?in|logged.in|sign.?in|authenticat|account credentials|--cookies|private|"
+     r"age.restricted|confirm your age|empty media response|not available.*rate.limit",
+     "O {site} exige login para este conteudo (post privado, story, restricao de idade, ou o site "
+     "limitou o acesso anonimo).\n" + LOGIN_HINT, True),
+    (r"No video could be found|no video in this|There.s no video|No video formats found",
+     "Nao achei video neste link (pode ser so foto ou texto).", False),
+    (r"[Ss]uspended", "A conta foi suspensa.", False),
+    (r"HTTP Error 403", "O {site} recusou o download (403). Tente de novo em alguns minutos.", False),
+    (r"HTTP Error 429|Too Many Requests", "Muitas requisicoes - o {site} limitou. Espere uns minutos.", False),
+    (r"HTTP Error 404|not found|has been removed|deleted",
+     "Conteudo nao encontrado (removido, apagado ou link errado).", False),
+    (r"Video unavailable|video is unavailable|not available",
+     "Video indisponivel (removido, bloqueado na regiao ou sem permissao).", False),
+    (r"Unsupported URL|is not a valid URL",
+     "Link nao suportado: o yt-dlp nao reconhece video neste endereco.", False),
+    (r"timed out|Connection (refused|reset)|Temporary failure in name resolution|nodename nor servname",
+     "O {site} nao respondeu (rede lenta ou fora do ar). Tente de novo.", False),
 ]
 
 
@@ -129,11 +195,25 @@ class YtdlpError(RuntimeError):
         self.fatal = any(p.lower() in raw.lower() for p in FATAL_PATTERNS)
 
 
-def friendly_error(raw):
-    for pattern, msg in FRIENDLY_ERRORS:
-        if re.search(pattern, raw, re.IGNORECASE):
-            return f"{msg}\n\nDetalhe tecnico:\n{raw}"
-    return raw
+def explain_error(raw, url=""):
+    """-> (mensagem, precisa_login). Olha primeiro as linhas de ERROR (WARNINGs falam de cookies a toa)."""
+    lines = raw.splitlines()
+    focus = "\n".join([l for l in lines if "ERROR" in l] or lines)
+    site = site_name(url) if url else "site"
+    for pattern, msg, login in FRIENDLY_ERRORS:
+        if re.search(pattern, focus, re.IGNORECASE):
+            msg = msg.format(site=site)
+            browser = load_config()["cookies_browser"]
+            if login and browser and "Ajustes > Cookies" in msg:
+                msg = (msg.split("\n")[0] + f"\nVoce ja esta usando os cookies do {browser.title()}: abra o {site} "
+                       "nele, confira se esta logado (e se sua conta tem acesso a esse post) e tente de novo.")
+            return f"{msg}\n\nDetalhe tecnico:\n{raw}", login
+    return raw, False
+
+
+def fail_job(job_id, raw, url):
+    msg, login = explain_error(raw, url)
+    set_job(job_id, status="error", error=msg, login=login)
 
 
 def ytdlp_cmd(client, *args):
@@ -141,12 +221,15 @@ def ytdlp_cmd(client, *args):
     return [
         "yt-dlp", "--no-update",
         *(["--cookies-from-browser", cookies] if cookies else []),
-        "--extractor-args", f"youtube:player_client={client}",
+        *(["--extractor-args", f"youtube:player_client={client}"] if client != "default" else []),
+        "--no-playlist",  # watch?v=...&list=... baixa so o video (carrossel do Instagram continua vindo inteiro)
         *args,
     ]
 
 
-def client_order(preferred):
+def client_order(preferred, url):
+    if not is_youtube(url):
+        return ["default"]
     if preferred in CLIENTS:
         return [preferred] + [c for c in CLIENTS if c != preferred]
     return list(CLIENTS)
@@ -167,7 +250,7 @@ def tail_of(lines, n=5):
 def run_ytdlp_info(url):
     """Busca info do video via yt-dlp. Retorna dict com title, duration, is_live, etc."""
     errors = []
-    for client in CLIENTS:
+    for client in client_order(None, url):
         cmd = ytdlp_cmd(
             client, "--no-download",
             "--print", "title:::%(title)s",
@@ -177,22 +260,31 @@ def run_ytdlp_info(url):
             "--print", "release_timestamp:::%(release_timestamp)s",
             "--print", "height:::%(height)s",
             "--print", "thumbnail:::%(thumbnail)s",
-            "--print", "channel:::%(channel)s",
+            "--print", "channel:::%(channel,uploader)s",
+            "--print", "id:::%(id)s",
+            "--print", "site:::%(extractor_key)s",
             url,
         )
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"O {site_name(url)} demorou demais pra responder (timed out). Tente de novo.")
         if result.returncode == 0:
-            info = {"client": client}
+            # Carrossel/playlist imprime um bloco por video: fica com o primeiro e conta quantos sao.
+            info = {"client": client, "count": 0}
             for line in result.stdout.strip().splitlines():
                 if ":::" in line:
                     k, v = line.split(":::", 1)
-                    info[k] = v
+                    if k == "title":
+                        info["count"] += 1
+                    if info["count"] <= 1:
+                        info[k] = v
             return info
         err = YtdlpError("\n".join(tail_of((result.stderr or result.stdout).splitlines())) or "Falha ao buscar info")
         errors.append(err)
         if err.fatal:
             break
-    raise RuntimeError(friendly_error(errors[-1].raw))
+    raise errors[-1]
 
 
 def parse_percent(line):
@@ -222,6 +314,14 @@ def clip_basename(title, start_s, end_s, tag=""):
     return f"{sanitize_filename(title)[:60].rstrip('_-')}{tag}_{span}"
 
 
+def finish_download(job_id, files, message="Pronto!"):
+    """Registra o(s) arquivo(s) baixado(s). Se vier transcricao depois, o job continua 'running'."""
+    fields = dict(progress=100, message=message, file_path=str(files[0]), files=[str(f) for f in files])
+    if not get_job(job_id).get("transcribe"):
+        fields["status"] = "done"
+    set_job(job_id, **fields)
+
+
 def download_vod_section(job_id, client, url, start_s, end_s, title, height):
     """Caso VOD comum: --download-sections funciona nativamente."""
     set_job(job_id, status="running", message="Baixando trecho...", progress=0)
@@ -236,24 +336,32 @@ def download_vod_section(job_id, client, url, start_s, end_s, title, height):
     )
     run_ytdlp_streaming(cmd, lambda pct: set_job(
         job_id, progress=pct, message=f"Baixando trecho... {pct:.0f}%"))
-    set_job(job_id, status="done", progress=100, message="Pronto!", file_path=str(out_path))
+    finish_download(job_id, [out_path])
 
 
-def download_full(job_id, client, url, title, height):
-    """Video inteiro (VOD ou live encerrada)."""
+def download_full(job_id, client, url, title, height, count=1):
+    """Video inteiro (VOD ou live encerrada). count > 1: carrossel/post com varios videos."""
     set_job(job_id, status="running", message="Baixando video...", progress=0)
-    out_path = download_dir() / f"{sanitize_filename(title)[:80].rstrip('_-')}.mp4"
+    base = sanitize_filename(title)[:80].rstrip('_-')
+    out_path = download_dir() / f"{base}.mp4"
+    out_tmpl = str(download_dir() / f"{base}_%(playlist_index)02d.mp4") if count > 1 else str(out_path)
     cmd = ytdlp_cmd(
         client, "--newline",
         *format_args(height),
         "--merge-output-format", "mp4",
         "--concurrent-fragments", "5",
-        "-o", str(out_path),
+        "-o", out_tmpl,
         url,
     )
     run_ytdlp_streaming(cmd, lambda pct: set_job(
         job_id, progress=pct, message=f"Baixando video... {pct:.0f}%"))
-    set_job(job_id, status="done", progress=100, message="Pronto!", file_path=str(out_path))
+    if count > 1:
+        files = sorted(download_dir().glob(f"{base}_[0-9][0-9].mp4"))
+        if files:
+            finish_download(job_id, files, f"Pronto! {len(files)} videos salvos")
+            return
+    finish_download(job_id, [out_path])
+
 
 
 def download_post_live(job_id, client, url, start_s, end_s, title, height):
@@ -290,7 +398,7 @@ def download_post_live(job_id, client, url, start_s, end_s, title, height):
     if result.returncode != 0:
         tail = (result.stderr or "").strip().splitlines()[-5:]
         raise RuntimeError("\n".join(tail) or "ffmpeg falhou")
-    set_job(job_id, status="done", progress=100, message="Pronto!", file_path=str(out_path))
+    finish_download(job_id, [out_path])
 
 
 def hls_segment_duration(m3u8):
@@ -386,7 +494,7 @@ def download_live_hls(job_id, client, url, start_s, end_s, title, height):
             raise RuntimeError("\n".join(tail) or "ffmpeg falhou")
     finally:
         tmp_ts.unlink(missing_ok=True)
-    set_job(job_id, status="done", progress=100, message="Pronto!", file_path=str(out_path))
+    finish_download(job_id, [out_path])
 
 
 def fetch_segments(job_id, urls, dest, seg_duration):
@@ -524,12 +632,200 @@ def stop_all_recordings():
                 return
         time.sleep(0.2)
 
+# ---------- Transcricao ----------
+# 1) legenda do proprio site (manual, depois automatica, no idioma original);
+# 2) sem legenda: Whisper local (whisper.cpp, acelerado pela GPU no Apple Silicon).
+WHISPER_MODEL = "ggml-large-v3-turbo-q5_0.bin"
+WHISPER_MODEL_URL = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{WHISPER_MODEL}"
+MODELS_DIR = CONFIG_PATH.parent / "models"
 
-def run_download_job(job_id, url, start_s, end_s, info, height, mode="clip", back_min=0):
+
+def vtt_time(t):
+    parts = t.replace(",", ".").split(":")
+    return sum(float(x) * 60 ** i for i, x in enumerate(reversed(parts)))
+
+
+def vtt_to_text(vtt, start_s=None, end_s=None):
+    """WebVTT -> texto puro. Remove tempos/tags e as linhas repetidas das legendas automaticas
+    (que vao "rolando": cada bloco repete a linha anterior). Quebra paragrafo em pausas longas."""
+    paragraphs, current, recent, last_end = [], [], [], None
+    for block in re.split(r"\n\s*\n", vtt.replace("\r", "")):
+        m = re.search(r"([\d:.,]+)\s+-->\s+([\d:.,]+)", block)
+        if not m:
+            continue
+        b, e = vtt_time(m.group(1)), vtt_time(m.group(2))
+        if (start_s is not None and e <= start_s) or (end_s is not None and b >= end_s):
+            continue
+        if last_end is not None and b - last_end > 2.5 and current:
+            paragraphs.append(" ".join(current))
+            current = []
+        last_end = e
+        for line in block[m.end():].splitlines():
+            line = re.sub(r"<[^>]+>", "", line)
+            line = re.sub(r"\s+", " ", line.replace("&nbsp;", " ").replace("&amp;", "&")
+                          .replace("&lt;", "<").replace("&gt;", ">")).strip()
+            if not line or line in recent:
+                continue
+            current.append(line)
+            recent = (recent + [line])[-3:]
+    if current:
+        paragraphs.append(" ".join(current))
+    return "\n\n".join(paragraphs).strip()
+
+
+def pick_subtitle(info):
+    """-> (idioma, automatica?) da legenda no idioma original, ou None."""
+    subs = {k: v for k, v in (info.get("subtitles") or {}).items() if k != "live_chat"}
+    auto = info.get("automatic_captions") or {}
+    orig = [k for k in auto if k.endswith("-orig")]
+    lang = info.get("language") or (orig[0][:-5] if orig else (next(iter(auto)) if len(auto) == 1 else None))
+    if lang:
+        for k in subs:
+            if k == lang or k.split("-")[0] == lang.split("-")[0]:
+                return k, False
+    if subs and not lang:  # idioma desconhecido: a primeira costuma ser a original do autor
+        return next(iter(subs)), False
+    if orig:
+        return orig[0], True
+    if lang and lang in auto:
+        return lang, True
+    return None
+
+
+def site_transcript(client, url, start_s=None, end_s=None):
+    """Texto das legendas do site, ou None se nao houver."""
+    r = subprocess.run(ytdlp_cmd(client, "-J", "--skip-download", url), capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        return None
+    try:
+        info = json.loads(r.stdout.splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+    choice = pick_subtitle(info)
+    if not choice:
+        return None
+    lang, automatic = choice
+    tmp = Path(tempfile.mkdtemp(prefix="cutter-subs-"))
+    try:
+        r = subprocess.run(ytdlp_cmd(
+            client, "--skip-download", "--write-auto-subs" if automatic else "--write-subs",
+            "--sub-langs", lang, "--sub-format", "vtt/best", "--convert-subs", "vtt",
+            "-o", str(tmp / "sub"), url), capture_output=True, text=True, timeout=180)
+        files = sorted(tmp.glob("sub*.vtt"))
+        if r.returncode != 0 or not files:
+            return None
+        return vtt_to_text(files[0].read_text(errors="replace"), start_s, end_s) or None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def ensure_whisper_model(job_id):
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    model = MODELS_DIR / WHISPER_MODEL
+    if model.exists():
+        return model
+    import urllib.request
+    part = model.with_suffix(".part")
+    req = urllib.request.Request(WHISPER_MODEL_URL, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=60) as resp, open(part, "wb") as f:
+        total = int(resp.headers.get("Content-Length") or 0)
+        got = 0
+        while chunk := resp.read(1 << 20):
+            f.write(chunk)
+            got += len(chunk)
+            if total:
+                set_job(job_id, progress=100 * got / total,
+                        message=f"Baixando o modelo de transcricao (so na primeira vez)... "
+                                f"{got / 1e6:.0f} de {total / 1e6:.0f} MB")
+    part.rename(model)
+    return model
+
+
+def whisper_transcript(job_id, video, label=""):
+    exe = whisper_bin()
+    if not exe:
+        raise RuntimeError("Sem legenda no site, e o Whisper nao esta instalado. "
+                           "No Terminal: brew install whisper-cpp")
+    model = ensure_whisper_model(job_id)
+    tmp = Path(tempfile.mkdtemp(prefix="cutter-whisper-"))
+    try:
+        set_job(job_id, progress=0, message=f"Extraindo o audio{label}...")
+        wav = tmp / "audio.wav"
+        r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-vn",
+                            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav)],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not wav.exists() or wav.stat().st_size < 1000:
+            raise RuntimeError("O video nao tem audio - nao ha o que transcrever.")
+        cmd = [exe, "-m", str(model), "-f", str(wav), "-l", "auto", "-otxt", "-of", str(tmp / "out"),
+               "-pp", "-t", str(max(4, min(8, os.cpu_count() or 4)))]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        last = []
+        for line in proc.stdout:
+            last = (last + [line.rstrip()])[-10:]
+            m = re.search(r"progress\s*=\s*(\d+)%", line)
+            if m:
+                set_job(job_id, progress=float(m.group(1)), message=f"Transcrevendo com Whisper{label}... {m.group(1)}%")
+            m = re.search(r"auto-detected language: (\w+)", line)
+            if m:
+                set_job(job_id, message=f"Transcrevendo com Whisper{label} (idioma: {m.group(1)})...")
+        proc.wait()
+        out = tmp / "out.txt"
+        if proc.returncode != 0 or not out.exists():
+            raise RuntimeError("O Whisper falhou:\n" + "\n".join(l for l in last if l.strip())[-800:])
+        lines = [l.strip() for l in out.read_text(errors="replace").splitlines()]
+        return "\n".join(l for l in lines if l and l != "[BLANK_AUDIO]").strip()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def transcribe_job(job_id, client, url, files, start_s=None, end_s=None, use_subs=True):
+    """Gera <video>.txt ao lado de cada video. Falhar aqui nao apaga o download."""
+    txts, notes = [], []
+    done_msg = get_job(job_id).get("message") or "Pronto!"  # mensagem do download, antes das etapas da transcricao
+    for i, video in enumerate(files):
+        video = Path(video)
+        label = f" ({i + 1}/{len(files)})" if len(files) > 1 else ""
+        try:
+            text, source = None, "Whisper"
+            if use_subs and len(files) == 1:
+                set_job(job_id, progress=0, message="Procurando legendas do site...")
+                text, source = site_transcript(client, url, start_s, end_s), "legendas do site"
+            if not text:
+                text, source = whisper_transcript(job_id, video, label), "Whisper"
+            if not text:
+                raise RuntimeError("Nenhuma fala reconhecida no audio.")
+            txt = video.with_suffix(".txt")
+            txt.write_text(text + "\n", encoding="utf-8")
+            txts.append(txt)
+            notes.append(source)
+        except Exception as e:
+            notes.append(f"erro: {e}")
+    if txts:
+        how = ", ".join(sorted(set(n for n in notes if not n.startswith("erro"))))
+        msg = f"{done_msg} · transcricao via {how}"
+    else:
+        msg = f"{done_msg} · transcricao nao gerada"
+    errors = [n[6:] for n in notes if n.startswith("erro")]
+    set_job(job_id, status="done", progress=100, message=msg, txt_path=str(txts[0]) if txts else "",
+            transcript_error="\n".join(errors))
+
+
+def run_download_job(job_id, url, start_s, end_s, info, height, mode="clip", back_min=0, transcribe=False):
     # is_live chega como bool (via /api/info -> pagina) ou "True"/"False" (direto do yt-dlp)
     is_live = str(info.get("is_live", "")).lower() == "true"
     live_status = info.get("live_status", "")
     title = info.get("title") or "video"
+    youtube = is_youtube(url)
+    if not youtube:
+        # Instagram/TikTok repetem titulos ("Video by fulano"): o id evita sobrescrever outro download.
+        vid = str(info.get("id") or "")
+        if vid and vid != "NA" and vid not in title:
+            title = f"{title[:40]} {vid}"
+        if is_live or live_status == "is_live":
+            set_job(job_id, status="error",
+                    error=f"Gravar ou recortar live em andamento so funciona no YouTube por enquanto "
+                          f"({site_name(url)} nao suportado). Quando a live terminar, da pra baixar o video.")
+            return
     if (is_live or live_status == "is_live") and mode == "record":
         fn = lambda job_id, client, url, _s, _e, title, height: record_live(job_id, client, url, title, height, back_min)
         info = {**info, "client": "web_embedded"}
@@ -545,21 +841,31 @@ def run_download_job(job_id, url, start_s, end_s, info, height, mode="clip", bac
     else:
         fn = download_vod_section
     if start_s is None and mode == "full":
-        full = download_full
-        fn = lambda job_id, client, url, _s, _e, title, height: full(job_id, client, url, title, height)
+        try:
+            count = int(info.get("count") or 1)
+        except (TypeError, ValueError):
+            count = 1
+        fn = lambda job_id, client, url, _s, _e, title, height: download_full(job_id, client, url, title, height, count)
 
-    clients = client_order(info.get("client"))
+    clients = client_order(info.get("client"), url)
+    transcribe = transcribe and mode != "record"
+    set_job(job_id, transcribe=transcribe)
     for i, client in enumerate(clients):
         try:
             fn(job_id, client, url, start_s, end_s, title, height)
+            if transcribe:
+                # Live em andamento: a numeracao de tempo da legenda nao bate com o trecho; vai de Whisper.
+                live_now = is_live or live_status == "is_live"
+                transcribe_job(job_id, client, url, get_job(job_id).get("files") or [],
+                               start_s, end_s, use_subs=not live_now)
             return
         except YtdlpError as e:
             if e.fatal or i == len(clients) - 1:
-                set_job(job_id, status="error", error=friendly_error(e.raw))
+                fail_job(job_id, e.raw, url)
                 return
             set_job(job_id, progress=0, message=f"Falhou com o cliente {client}, tentando {clients[i + 1]}...")
         except Exception as e:
-            set_job(job_id, status="error", error=friendly_error(str(e)))
+            fail_job(job_id, str(e), url)
             return
 
 
@@ -589,7 +895,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._json(200, get_job(job_id) or {"status": "unknown"})
         elif path == "/api/config":
             self._json(200, {**load_config(), "browsers": COOKIE_BROWSERS,
-                             "missing": missing_dependencies()})
+                             "missing": missing_dependencies(), "whisper": bool(whisper_bin())})
         elif path.startswith("/api/stop/"):
             job_id = path.rsplit("/", 1)[-1]
             self._json(200, {"ok": stop_recording(job_id)})
@@ -604,12 +910,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         try:
             if path == "/api/info":
                 data = self._read_json()
-                url = data.get("url", "").strip()
+                url = normalize_url(data.get("url", ""))
                 if not url:
                     return self._json(400, {"error": "URL vazia"})
-                info = run_ytdlp_info(url)
                 try:
-                    dur_s = int(info.get("duration") or 0)
+                    info = run_ytdlp_info(url)
+                except YtdlpError as e:
+                    msg, login = explain_error(e.raw, url)
+                    return self._json(422, {"error": msg, "login": login})
+                try:
+                    dur_s = int(float(info.get("duration") or 0))
                 except ValueError:
                     dur_s = 0
                 self._json(200, {
@@ -623,10 +933,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "thumbnail": info.get("thumbnail", "") if info.get("thumbnail", "").startswith("http") else "",
                     "channel": "" if info.get("channel") in (None, "NA") else info.get("channel", ""),
                     "max_height": int(info["height"]) if info.get("height", "").isdigit() else 0,
+                    "id": info.get("id", ""),
+                    "site": site_name(url),
+                    "youtube": is_youtube(url),
+                    "count": info.get("count", 1),
                 })
             elif path == "/api/download":
                 data = self._read_json()
-                url = data.get("url", "").strip()
+                url = normalize_url(data.get("url", ""))
                 start = data.get("start", "").strip()
                 end = data.get("end", "").strip()
                 info = data.get("info", {})
@@ -653,7 +967,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         return self._json(400, {"error": "O fim precisa ser maior que o inicio."})
                 job_id = uuid.uuid4().hex[:12]
                 set_job(job_id, status="queued", progress=0, message="Iniciando...")
-                t = threading.Thread(target=run_download_job, args=(job_id, url, start_s, end_s, info, height, mode, back_min), daemon=True)
+                transcribe = bool(data.get("transcribe"))
+                t = threading.Thread(target=run_download_job, daemon=True,
+                                     args=(job_id, url, start_s, end_s, info, height, mode, back_min, transcribe))
                 t.start()
                 self._json(200, {"job_id": job_id})
             elif path == "/api/open":

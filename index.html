@@ -94,6 +94,13 @@
 
   .msg { margin: 10px 4px 0; font-size: 13px; color: var(--dim); min-height: 18px; }
   .msg.err { color: #ff8a8a; white-space: pre-wrap; }
+  .btn.login-btn:not(.show) { display: none; }
+  .toggle { display: flex; align-items: center; gap: 9px; margin: 16px 4px 0; font-size: 14px; color: var(--text); cursor: pointer; }
+  .toggle input { width: 16px; height: 16px; margin: 0; accent-color: #ff453a; cursor: pointer; }
+  .result .note { margin-top: 8px; font-size: 12px; color: #ff8a8a; white-space: pre-wrap; }
+  .btn-row.err-row { display: flex; }
+  .err-row .btn { flex: 1; }
+  #urlLogin { margin-top: 10px; }
 
   /* Preview */
   .preview { display: none; margin-top: 18px; animation: rise .45s cubic-bezier(.2,.8,.2,1); }
@@ -253,9 +260,10 @@
 
   <div class="glass card">
     <div class="banner" id="depBanner"></div>
-    <label for="url">Link do YouTube</label>
-    <input id="url" type="url" placeholder="Cole o link aqui" autocomplete="off" spellcheck="false">
+    <label for="url">Link do video</label>
+    <input id="url" type="url" placeholder="YouTube, Instagram, TikTok, X, Facebook, Vimeo..." autocomplete="off" spellcheck="false">
     <div class="msg" id="urlMsg"></div>
+    <button type="button" class="btn ghost login-btn" id="urlLogin">Usar cookies do navegador</button>
 
     <div class="preview" id="preview">
       <div class="thumb" id="thumb">
@@ -318,6 +326,11 @@
         </select>
       </div>
 
+      <div id="trRow">
+        <label class="toggle"><input type="checkbox" id="transcribe"> Gerar transcricao (.txt)</label>
+        <div class="hint" id="trHint">Salva o texto ao lado do video, com o mesmo nome. Usa a legenda do site; sem legenda, transcreve no Mac com o Whisper.</div>
+      </div>
+
       <button class="btn" id="go" disabled>Baixar</button>
     </div>
 
@@ -331,17 +344,22 @@
     <div class="result" id="done">
       <div class="ttl"><span class="check"><svg width="11" height="11" viewBox="0 0 12 12"><path d="M2.5 6.2l2.4 2.4 4.6-5" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span id="doneTitle">Pronto</span></div>
       <div class="path" id="donePath"></div>
+      <div class="note" id="doneNote"></div>
       <div class="btn-row">
         <button class="btn" id="openFile">Abrir video</button>
         <button class="btn ghost" id="openFolder">Mostrar pasta</button>
       </div>
+      <button class="btn ghost" id="openTxt" style="margin-top:10px">Abrir transcricao</button>
       <button class="btn ghost" id="newOne" style="margin-top:10px">Novo download</button>
     </div>
 
     <div class="result error" id="error">
       <div class="ttl">Nao deu certo</div>
       <pre id="errMsg"></pre>
-      <button class="btn ghost" id="retry" style="margin-top:14px">Tentar de novo</button>
+      <div class="btn-row err-row">
+        <button class="btn ghost" id="retry">Tentar de novo</button>
+        <button class="btn ghost login-btn" id="errLogin">Usar cookies do navegador</button>
+      </div>
     </div>
   </div>
 
@@ -354,7 +372,7 @@
     <div class="field">
       <label for="cfgCookies">Cookies do navegador</label>
       <select id="cfgCookies"></select>
-      <div class="hint">Use um navegador em que voce esteja logado no YouTube se aparecer "confirme que voce nao e um robo" ou para videos com restricao de idade.</div>
+      <div class="hint">Escolha um navegador em que voce esteja logado no site (YouTube, Instagram, TikTok, X...) para baixar stories, posts que exigem login, videos com restricao de idade ou quando o YouTube pedir "confirme que voce nao e um robo".</div>
     </div>
     <div class="msg" id="cfgMsg"></div>
     <div class="btn-row">
@@ -381,6 +399,7 @@ const statusEl = $("status"), bar = $("bar"), fillEl = $("fill"), pctEl = $("pct
 const recLine = $("recLine"), recText = $("recText"), stopBtn = $("stopRec");
 const doneEl = $("done"), doneTitle = $("doneTitle"), donePath = $("donePath");
 const errorEl = $("error"), errMsg = $("errMsg");
+const urlLogin = $("urlLogin"), errLogin = $("errLogin");
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (_) { return d; } },
@@ -398,6 +417,15 @@ backPills.querySelectorAll("button").forEach(b => b.addEventListener("click", ()
   applyMode();
 }));
 qualityEl.value = store.get("quality", "720");
+const trEl = $("transcribe"), trRow = $("trRow"), trHint = $("trHint");
+let doneTxtPath = null, hasWhisper = true;
+trEl.checked = store.get("transcribe", "0") === "1";
+trEl.addEventListener("change", () => { store.set("transcribe", trEl.checked ? "1" : "0"); updateTrHint(); });
+function updateTrHint() {
+  trHint.textContent = trEl.checked && !hasWhisper
+    ? "Videos sem legenda no site (comum no Instagram e TikTok) precisam do Whisper. No Terminal: brew install whisper-cpp"
+    : "Salva o texto ao lado do video, com o mesmo nome. Usa a legenda do site; sem legenda, transcreve no Mac com o Whisper.";
+}
 qualityEl.addEventListener("change", () => store.set("quality", qualityEl.value));
 
 const isLiveNow = () => !!currentInfo && (currentInfo.is_live || currentInfo.live_status === "is_live");
@@ -417,6 +445,7 @@ function applyMode() {
   timeRow.style.display = mode === "clip" ? "grid" : "none";
   liveHelper.style.display = live && mode === "clip" ? "flex" : "none";
   backRow.style.display = mode === "record" ? "block" : "none";
+  trRow.style.display = mode === "record" ? "none" : "block";
   backPills.querySelectorAll("button").forEach(b => b.classList.toggle("on", parseInt(b.dataset.min, 10) === backMin));
   backHint.textContent = backMin
     ? `Pega os ultimos ${backMin >= 60 ? backMin / 60 + " h" : backMin + " min"} e continua gravando ao vivo, sem emenda.`
@@ -448,6 +477,7 @@ function autoFormatTime(el) {
 
 function resetPreview() {
   currentInfo = null;
+  urlLogin.classList.remove("show");
   preview.classList.remove("show");
   controls.classList.remove("show");
   art.classList.remove("show");
@@ -459,8 +489,8 @@ urlEl.addEventListener("input", () => {
   urlMsg.textContent = ""; urlMsg.className = "msg";
   const url = urlEl.value.trim();
   if (!url) return;
-  if (!/youtu\.?be/i.test(url)) {
-    urlMsg.textContent = "Isso nao parece um link do YouTube.";
+  if (!/^(https?:\/\/)?[^\s\/]+\.[a-z]{2,}(\/|$)/i.test(url)) {
+    urlMsg.textContent = "Isso nao parece um link. Cole o endereco do video (ex.: https://www.instagram.com/reel/...).";
     urlMsg.className = "msg err";
     return;
   }
@@ -468,20 +498,23 @@ urlEl.addEventListener("input", () => {
 });
 
 async function fetchInfo(url) {
+  urlLogin.classList.remove("show");
   urlMsg.innerHTML = '<span class="spinner"></span>Buscando informacoes...';
   urlMsg.className = "msg";
   try {
     const r = await fetch("/api/info", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
     const data = await r.json();
-    if (!r.ok) throw new Error(data.error || "Falha ao buscar info");
+    if (!r.ok) throw Object.assign(new Error(data.error || "Falha ao buscar info"), { login: data.login });
     if (urlEl.value.trim() !== url) return;
     currentInfo = data;
     renderPreview(data);
     urlMsg.textContent = "";
   } catch (e) {
+    if (urlEl.value.trim() !== url) return;
     resetPreview();
     urlMsg.textContent = e.message;
     urlMsg.className = "msg err";
+    urlLogin.classList.toggle("show", !!e.login);
   }
   setGoEnabled();
 }
@@ -512,6 +545,8 @@ function renderPreview(info) {
   } else if (info.live_status === "post_live") {
     pvChips.append(chip("Live encerrada"));
   }
+  if (info.site && !info.youtube) pvChips.append(chip(info.site));
+  if (info.count > 1) pvChips.append(chip(`${info.count} videos`));
   if (info.duration_hms) pvChips.append(chip(info.duration_hms));
   if (info.max_height) pvChips.append(chip(`ate ${info.max_height}p`));
   preview.classList.add("show");
@@ -565,6 +600,7 @@ goBtn.addEventListener("click", async () => {
         start: startEl.value.trim(), end: endEl.value.trim(),
         quality: parseInt(qualityEl.value, 10), info: currentInfo,
         back_min: mode === "record" ? backMin : 0,
+        transcribe: mode !== "record" && trEl.checked,
       }),
     });
     const data = await r.json();
@@ -595,19 +631,24 @@ async function pollProgress() {
       stopPolling();
       doneFilePath = data.file_path;
       doneTitle.textContent = data.message && data.message !== "Pronto!" ? data.message : "Pronto";
-      donePath.textContent = data.file_path;
+      donePath.textContent = data.file_path + (data.txt_path ? "\n" + data.txt_path : "");
+      donePath.style.whiteSpace = "pre-wrap";
+      doneTxtPath = data.txt_path || null;
+      $("openTxt").style.display = doneTxtPath ? "block" : "none";
+      $("doneNote").textContent = data.transcript_error ? "Transcricao: " + data.transcript_error : "";
       showOnly(doneEl);
     } else if (data.status === "error") {
-      showError(data.error || "Erro desconhecido");
+      showError(data.error || "Erro desconhecido", data.login);
     }
   } catch (_) { /* erro transiente, continua */ }
 }
 
 function stopPolling() { if (polling) { clearInterval(polling); polling = null; } }
 
-function showError(msg) {
+function showError(msg, login) {
   stopPolling();
   errMsg.textContent = msg;
+  errLogin.classList.toggle("show", !!login);
   showOnly(errorEl);
 }
 
@@ -620,6 +661,7 @@ stopBtn.addEventListener("click", async () => {
 const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
 $("openFile").addEventListener("click", () => doneFilePath && post("/api/open", { path: doneFilePath }));
 $("openFolder").addEventListener("click", () => post("/api/open-folder"));
+$("openTxt").addEventListener("click", () => doneTxtPath && post("/api/open", { path: doneTxtPath }));
 $("folderLink").addEventListener("click", () => post("/api/open-folder"));
 $("newOne").addEventListener("click", () => {
   currentJobId = null; doneFilePath = null;
@@ -646,6 +688,8 @@ async function loadConfig() {
     cfgCookies.innerHTML = "";
     (cfg.browsers || [""]).forEach(b => cfgCookies.append(new Option(BROWSER_NAMES[b] || b, b)));
     cfgCookies.value = cfg.cookies_browser || "";
+    hasWhisper = cfg.whisper !== false;
+    updateTrHint();
     const banner = $("depBanner");
     if (cfg.missing && cfg.missing.length) {
       banner.innerHTML = "";
@@ -658,11 +702,21 @@ async function loadConfig() {
   } catch (_) {}
 }
 
-$("settingsLink").addEventListener("click", () => {
+function openSettings(focusCookies) {
   cfgMsg.textContent = ""; cfgMsg.className = "msg";
-  settingsEl.classList.toggle("show");
-  if (settingsEl.classList.contains("show")) settingsEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  settingsEl.classList.add("show");
+  settingsEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  if (focusCookies) {
+    cfgCookies.focus();
+    cfgMsg.textContent = "Escolha o navegador em que voce esta logado no site, clique em Salvar e tente de novo.";
+  }
+}
+$("settingsLink").addEventListener("click", () => {
+  if (settingsEl.classList.contains("show")) settingsEl.classList.remove("show");
+  else openSettings(false);
 });
+// Pedido de login: abre os Ajustes no seletor de cookies.
+[urlLogin, errLogin].forEach(b => b.addEventListener("click", () => openSettings(true)));
 $("cfgClose").addEventListener("click", () => settingsEl.classList.remove("show"));
 $("cfgSave").addEventListener("click", async () => {
   try {
@@ -671,6 +725,8 @@ $("cfgSave").addEventListener("click", async () => {
     if (!r.ok) throw new Error(data.error || "Nao foi possivel salvar");
     cfgDir.value = data.download_dir;
     cfgMsg.textContent = "Salvo."; cfgMsg.className = "msg";
+    // Se o link anterior falhou pedindo login, tenta de novo ja com os cookies novos.
+    if (urlLogin.classList.contains("show") && urlEl.value.trim()) fetchInfo(urlEl.value.trim());
   } catch (e) {
     cfgMsg.textContent = e.message; cfgMsg.className = "msg err";
   }
