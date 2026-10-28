@@ -13,6 +13,8 @@ App para macOS que baixa vídeos do YouTube, Instagram, TikTok, X/Twitter, Faceb
 - **Gravar ao vivo** (só YouTube) — grava a live a partir de agora **ou voltando 5, 10, 30 ou 60 minutos**, e continua até você parar ou a live acabar. Útil para quando você só percebe que precisava gravar depois que a parte importante já começou (sessões legislativas, palestras, eventos).
 - **Transcrição (.txt)** — marque "Gerar transcrição" e o Cutter salva um `.txt` de texto puro ao lado do vídeo, com o mesmo nome. Usa a legenda do próprio site (manual, depois automática, no idioma original); sem legenda (comum no Instagram e no TikTok), transcreve no Mac com o [whisper.cpp](https://github.com/ggml-org/whisper.cpp), detectando o idioma. Funciona também para trechos.
 - Escolha de qualidade (360p a 4K), com preferência por H.264/AAC para abrir em qualquer player/editor.
+- **Formato: vídeo, só áudio ou vídeo sem som** — em "Só áudio", salva MP3, M4A, Opus, WAV ou o áudio original (sem converter), com bitrate de 64 a 320 kbps; MP3 e M4A já vêm com título, artista e capa. "Vídeo sem som" tira a faixa de áudio. Vale para vídeo inteiro, trecho e lives (ideia inspirada no [cobalt](https://github.com/imputnet/cobalt)).
+- Arraste um link do navegador para a janela do Cutter para colar e buscar o vídeo.
 - Tenta outros clientes do YouTube automaticamente quando um falha, e mostra mensagens de erro compreensíveis (post privado, exige login, sem vídeo, bloqueado na região...). Quando o site pede login, aparece um botão que leva direto à escolha dos cookies do navegador.
 
 ## Requisitos

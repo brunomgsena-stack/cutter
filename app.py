@@ -869,6 +869,140 @@ def run_download_job(job_id, url, start_s, end_s, info, height, mode="clip", bac
             return
 
 
+# --- Formatos de saida (ideia do cobalt: modos "audio" e "mute") ---
+# Codigo novo e separado: o caminho de video normal (run_download_job) segue intocado.
+AUDIO_FORMATS = {"mp3", "m4a", "opus", "wav", "best"}
+AUDIO_BITRATES = {320, 256, 192, 128, 96, 64}
+AUDIO_CODECS = {"mp3": ["-c:a", "libmp3lame"], "m4a": ["-c:a", "aac"], "opus": ["-c:a", "libopus"],
+                "wav": ["-c:a", "pcm_s16le"], "best": ["-c:a", "copy"]}
+AUDIO_EXTS = (".mp3", ".m4a", ".opus", ".ogg", ".wav", ".aac", ".flac", ".webm", ".mka")
+
+
+def audio_ytdlp_args(fmt, bitrate):
+    """Extrai so o audio, com titulo/artista e capa embutidos quando o formato aceita."""
+    args = ["-f", "ba/b", "-x", "--audio-format", fmt, "--embed-metadata"]
+    if fmt not in ("best", "wav"):
+        args += ["--audio-quality", f"{bitrate}K"]
+    if fmt in ("mp3", "m4a"):
+        args += ["--embed-thumbnail", "--convert-thumbnails", "jpg"]
+    return args
+
+
+def download_audio(job_id, client, url, start_s, end_s, title, fmt, bitrate, count=1):
+    """So audio direto pelo yt-dlp (VOD, inteiro ou trecho): nao baixa a faixa de video."""
+    clip = start_s is not None
+    label = "audio do trecho" if clip else "audio"
+    set_job(job_id, status="running", message=f"Baixando {label}...", progress=0)
+    base = clip_basename(title, start_s, end_s) if clip else sanitize_filename(title)[:80].rstrip('_-')
+    many = count > 1 and not clip
+    out_tmpl = str(download_dir() / (f"{base}_%(playlist_index)02d.%(ext)s" if many else f"{base}.%(ext)s"))
+    started = time.time() - 2
+    cmd = ytdlp_cmd(
+        client, "--newline", "--no-mtime",
+        *(["--download-sections", f"*{start_s}-{end_s}"] if clip else []),
+        *audio_ytdlp_args(fmt, bitrate),
+        "-o", out_tmpl,
+        url,
+    )
+    run_ytdlp_streaming(cmd, lambda pct: set_job(
+        job_id, progress=pct, message=f"Baixando {label}... {pct:.0f}%"))
+    pattern = f"{base}_[0-9][0-9].*" if many else f"{base}.*"
+    files = sorted(f for f in download_dir().glob(pattern) if f.suffix.lower() in AUDIO_EXTS)
+    # A pasta pode ter um audio antigo com o mesmo nome em outro formato: fica com o que acabou de sair.
+    files = [f for f in files if f.stat().st_mtime >= started] or files
+    if not files:
+        raise RuntimeError("O yt-dlp terminou mas o arquivo de audio nao apareceu na pasta.")
+    finish_download(job_id, files, f"Pronto! {len(files)} audios salvos" if len(files) > 1 else "Pronto!")
+
+
+def ffmpeg_convert(src, output, fmt, bitrate, title="", artist=""):
+    """Transforma um video ja baixado em audio (ou video sem som). Devolve o arquivo novo."""
+    src = Path(src)
+    if output == "mute":
+        tmp = src.with_name(f".tmp_mudo_{src.name}")
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-map", "0:v", "-c", "copy", "-an",
+               "-movflags", "+faststart", str(tmp)]
+        dest = src
+    else:
+        ext = "m4a" if fmt == "best" else fmt
+        dest = src.with_suffix("." + ext)
+        tmp = src.with_name(f".tmp_audio_{dest.name}")
+        rate = [] if fmt in ("best", "wav") else ["-b:a", f"{bitrate}k"]
+        meta = [x for k, v in (("title", title), ("artist", artist)) if v for x in ("-metadata", f"{k}={v}")]
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vn", *AUDIO_CODECS[fmt], *rate, *meta, str(tmp)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError("Falha ao converter com ffmpeg:\n" + "\n".join(tail_of(r.stderr.splitlines())))
+    os.replace(tmp, dest)
+    if dest != src:
+        src.unlink(missing_ok=True)
+    return dest
+
+
+def run_then_convert(job_id, url, start_s, end_s, info, height, mode, output, fmt, bitrate, transcribe):
+    """Roda o download de video normal num job interno e depois converte o resultado.
+    Cobre live em andamento, live encerrada e "sem som" sem tocar no fluxo existente."""
+    inner = job_id + "_v"
+    t = threading.Thread(target=run_download_job, daemon=True,
+                         args=(inner, url, start_s, end_s, info, height, mode, 0, transcribe))
+    t.start()
+    while t.is_alive():
+        j = get_job(inner)
+        set_job(job_id, status="running", progress=j.get("progress", 0), message=j.get("message", "Baixando..."))
+        t.join(0.5)
+    j = get_job(inner)
+    with jobs_lock:
+        jobs.pop(inner, None)
+    if j.get("status") != "done":
+        set_job(job_id, status="error", error=j.get("error") or "Falha no download", login=j.get("login", False))
+        return
+    set_job(job_id, progress=0, message="Removendo o audio..." if output == "mute" else "Extraindo o audio...")
+    try:
+        files = [ffmpeg_convert(f, output, fmt, bitrate, info.get("title") or "", info.get("channel") or "")
+                 for f in j.get("files") or [j["file_path"]]]
+    except Exception as e:
+        fail_job(job_id, str(e), url)
+        return
+    set_job(job_id, status="done", progress=100, message=j.get("message") or "Pronto!",
+            file_path=str(files[0]), files=[str(f) for f in files], output=output,
+            txt_path=j.get("txt_path", ""), transcript_error=j.get("transcript_error", ""))
+
+
+def run_media_job(job_id, url, start_s, end_s, info, height, mode, output, fmt, bitrate, transcribe):
+    """Entrada dos formatos novos (output = "audio" ou "mute")."""
+    set_job(job_id, output=output)
+    live_status = info.get("live_status", "")
+    live_or_post = str(info.get("is_live", "")).lower() == "true" or live_status in ("is_live", "post_live")
+    if output == "mute" or live_or_post:
+        return run_then_convert(job_id, url, start_s, end_s, info, height, mode, output, fmt, bitrate, transcribe)
+    title = info.get("title") or "audio"
+    if not is_youtube(url):
+        vid = str(info.get("id") or "")
+        if vid and vid != "NA" and vid not in title:
+            title = f"{title[:40]} {vid}"
+    try:
+        count = int(info.get("count") or 1)
+    except (TypeError, ValueError):
+        count = 1
+    clients = client_order(info.get("client"), url)
+    set_job(job_id, transcribe=transcribe)
+    for i, client in enumerate(clients):
+        try:
+            download_audio(job_id, client, url, start_s, end_s, title, fmt, bitrate, count)
+            if transcribe:
+                transcribe_job(job_id, client, url, get_job(job_id).get("files") or [], start_s, end_s)
+            return
+        except YtdlpError as e:
+            if e.fatal or i == len(clients) - 1:
+                fail_job(job_id, e.raw, url)
+                return
+            set_job(job_id, progress=0, message=f"Falhou com o cliente {client}, tentando {clients[i + 1]}...")
+        except Exception as e:
+            fail_job(job_id, str(e), url)
+            return
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -968,8 +1102,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 job_id = uuid.uuid4().hex[:12]
                 set_job(job_id, status="queued", progress=0, message="Iniciando...")
                 transcribe = bool(data.get("transcribe"))
-                t = threading.Thread(target=run_download_job, daemon=True,
-                                     args=(job_id, url, start_s, end_s, info, height, mode, back_min, transcribe))
+                output = data.get("output", "video")
+                if output in ("audio", "mute") and mode != "record":
+                    fmt = data.get("audio_format") if data.get("audio_format") in AUDIO_FORMATS else "mp3"
+                    try:
+                        bitrate = int(data.get("audio_bitrate", 192))
+                    except (TypeError, ValueError):
+                        bitrate = 192
+                    if bitrate not in AUDIO_BITRATES:
+                        bitrate = 192
+                    t = threading.Thread(target=run_media_job, daemon=True,
+                                         args=(job_id, url, start_s, end_s, info, height, mode, output,
+                                               fmt, bitrate, transcribe))
+                else:
+                    t = threading.Thread(target=run_download_job, daemon=True,
+                                         args=(job_id, url, start_s, end_s, info, height, mode, back_min, transcribe))
                 t.start()
                 self._json(200, {"job_id": job_id})
             elif path == "/api/open":

@@ -313,7 +313,40 @@
         <div class="hint" id="backHint"></div>
       </div>
 
-      <div class="field">
+      <div class="field" id="outRow">
+        <label>Formato</label>
+        <div class="pills" id="outPills">
+          <button type="button" data-out="video">Video</button>
+          <button type="button" data-out="audio">So audio</button>
+          <button type="button" data-out="mute">Video sem som</button>
+        </div>
+      </div>
+
+      <div class="row" id="audioRow">
+        <div>
+          <label for="audioFormat">Formato do audio</label>
+          <select id="audioFormat">
+            <option value="mp3">MP3</option>
+            <option value="m4a">M4A (AAC)</option>
+            <option value="opus">Opus</option>
+            <option value="wav">WAV (sem perda)</option>
+            <option value="best">Original (sem converter)</option>
+          </select>
+        </div>
+        <div>
+          <label for="audioBitrate">Bitrate</label>
+          <select id="audioBitrate">
+            <option value="320">320 kbps</option>
+            <option value="256">256 kbps</option>
+            <option value="192">192 kbps</option>
+            <option value="128">128 kbps</option>
+            <option value="96">96 kbps</option>
+            <option value="64">64 kbps</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field" id="qualityRow">
         <label for="quality">Qualidade maxima</label>
         <select id="quality">
           <option value="360">360p</option>
@@ -428,6 +461,32 @@ function updateTrHint() {
 }
 qualityEl.addEventListener("change", () => store.set("quality", qualityEl.value));
 
+// Formato de saida (inspirado no cobalt): video normal, so audio ou video sem som.
+const outRow = $("outRow"), outPills = $("outPills"), audioRow = $("audioRow"), qualityRow = $("qualityRow");
+const audioFormatEl = $("audioFormat"), audioBitrateEl = $("audioBitrate");
+let outMode = store.get("outMode", "video");
+if (!["video", "audio", "mute"].includes(outMode)) outMode = "video";
+audioFormatEl.value = store.get("audioFormat", "mp3");
+audioBitrateEl.value = store.get("audioBitrate", "192");
+outPills.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+  outMode = b.dataset.out;
+  store.set("outMode", outMode);
+  applyMode();
+}));
+audioFormatEl.addEventListener("change", () => { store.set("audioFormat", audioFormatEl.value); applyOutput(currentMode()); });
+audioBitrateEl.addEventListener("change", () => store.set("audioBitrate", audioBitrateEl.value));
+const effectiveOut = (mode) => mode === "record" ? "video" : outMode;
+function applyOutput(mode) {
+  const out = effectiveOut(mode);
+  outRow.style.display = mode === "record" ? "none" : "block";
+  outPills.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.out === out));
+  audioRow.style.display = out === "audio" ? "grid" : "none";
+  audioBitrateEl.disabled = ["wav", "best"].includes(audioFormatEl.value);
+  qualityRow.style.display = out === "audio" ? "none" : "block";
+  if (out === "audio") goBtn.textContent = mode === "clip" ? "Baixar audio do trecho" : "Baixar audio";
+  else if (out === "mute") goBtn.textContent = mode === "clip" ? "Baixar trecho sem som" : "Baixar video sem som";
+}
+
 const isLiveNow = () => !!currentInfo && (currentInfo.is_live || currentInfo.live_status === "is_live");
 const currentMode = () => isLiveNow() ? modeLive : modeVod;
 
@@ -451,6 +510,7 @@ function applyMode() {
     ? `Pega os ultimos ${backMin >= 60 ? backMin / 60 + " h" : backMin + " min"} e continua gravando ao vivo, sem emenda.`
     : "Grava a partir de agora ate voce parar ou a live acabar.";
   goBtn.textContent = { record: "Comecar a gravar", full: "Baixar video", clip: "Baixar trecho" }[mode];
+  applyOutput(mode);
   setGoEnabled();
 }
 
@@ -601,6 +661,9 @@ goBtn.addEventListener("click", async () => {
         quality: parseInt(qualityEl.value, 10), info: currentInfo,
         back_min: mode === "record" ? backMin : 0,
         transcribe: mode !== "record" && trEl.checked,
+        output: effectiveOut(mode),
+        audio_format: audioFormatEl.value,
+        audio_bitrate: parseInt(audioBitrateEl.value, 10),
       }),
     });
     const data = await r.json();
@@ -634,6 +697,7 @@ async function pollProgress() {
       donePath.textContent = data.file_path + (data.txt_path ? "\n" + data.txt_path : "");
       donePath.style.whiteSpace = "pre-wrap";
       doneTxtPath = data.txt_path || null;
+      $("openFile").textContent = data.output === "audio" ? "Abrir audio" : "Abrir video";
       $("openTxt").style.display = doneTxtPath ? "block" : "none";
       $("doneNote").textContent = data.transcript_error ? "Transcricao: " + data.transcript_error : "";
       showOnly(doneEl);
@@ -669,6 +733,20 @@ $("newOne").addEventListener("click", () => {
   urlEl.value = ""; startEl.value = ""; endEl.value = "";
   resetPreview();
   urlEl.focus();
+});
+document.addEventListener("dragover", (e) => {
+  if (e.dataTransfer && [...e.dataTransfer.types].some(t => t === "text/uri-list" || t === "text/plain")) e.preventDefault();
+});
+document.addEventListener("drop", (e) => {
+  const dt = e.dataTransfer;
+  const link = dt && ((dt.getData("text/uri-list") || "").split(/\r?\n/).find(l => l && !l.startsWith("#"))
+    || (dt.getData("text/plain") || "").trim());
+  if (!link || !/^https?:\/\//i.test(link) || /^file:/i.test(link)) return;
+  e.preventDefault();
+  if (statusEl.classList.contains("show")) return;  // nao atrapalha um download em andamento
+  showOnly(null);
+  urlEl.value = link;
+  urlEl.dispatchEvent(new Event("input"));
 });
 $("retry").addEventListener("click", () => { showOnly(null); setGoEnabled(); });
 $("quit").addEventListener("click", async () => {
