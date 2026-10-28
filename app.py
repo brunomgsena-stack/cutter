@@ -1003,6 +1003,206 @@ def run_media_job(job_id, url, start_s, end_s, info, height, mode, output, fmt, 
             return
 
 
+# --- Legenda .srt (codigo novo; a transcricao .txt original continua igual quando o .srt nao e pedido) ---
+def srt_time(t):
+    ms = max(0, int(round(t * 1000)))
+    return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
+
+
+def clean_sub_line(line):
+    line = re.sub(r"<[^>]+>", "", line)
+    return re.sub(r"\s+", " ", line.replace("&nbsp;", " ").replace("&amp;", "&")
+                  .replace("&lt;", "<").replace("&gt;", ">")).strip()
+
+
+def vtt_to_srt(vtt, start_s=None, end_s=None, offset=0.0):
+    """WebVTT -> SRT. Legendas automaticas do YouTube "rolam" (cada bloco repete a linha anterior):
+    fica so a linha nova de cada bloco. offset = segundo do video original que vira 0 no arquivo."""
+    cues, recent = [], []
+    for block in re.split(r"\n\s*\n", vtt.replace("\r", "")):
+        m = re.search(r"([\d:.,]+)\s+-->\s+([\d:.,]+)", block)
+        if not m:
+            continue
+        b, e = vtt_time(m.group(1)), vtt_time(m.group(2))
+        if (start_s is not None and e <= start_s) or (end_s is not None and b >= end_s):
+            continue
+        new = []
+        for line in block[m.end():].splitlines():
+            line = clean_sub_line(line)
+            if line and line not in recent:
+                new.append(line)
+                recent = (recent + [line])[-3:]
+        if not new or e - b < 0.05:
+            continue
+        if end_s is not None:
+            e = min(e, end_s)
+        cues.append((max(0.0, b - offset), max(0.0, e - offset), "\n".join(new)))
+    # Blocos que se sobrepoem (rolagem) atrapalham alguns players: corta o fim no inicio do proximo.
+    out = []
+    for i, (b, e, text) in enumerate(cues):
+        if i + 1 < len(cues):
+            e = min(e, cues[i + 1][0]) if cues[i + 1][0] > b else e
+        out.append(f"{len(out) + 1}\n{srt_time(b)} --> {srt_time(e)}\n{text}\n")
+    return "\n".join(out)
+
+
+def site_vtt(client, url):
+    """VTT bruto das legendas do site (mesma escolha de idioma da transcricao), ou None."""
+    r = subprocess.run(ytdlp_cmd(client, "-J", "--skip-download", url), capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        return None
+    try:
+        info = json.loads(r.stdout.splitlines()[-1])
+    except (ValueError, IndexError):
+        return None
+    choice = pick_subtitle(info)
+    if not choice:
+        return None
+    lang, automatic = choice
+    tmp = Path(tempfile.mkdtemp(prefix="cutter-subs-"))
+    try:
+        r = subprocess.run(ytdlp_cmd(
+            client, "--skip-download", "--write-auto-subs" if automatic else "--write-subs",
+            "--sub-langs", lang, "--sub-format", "vtt/best", "--convert-subs", "vtt",
+            "-o", str(tmp / "sub"), url), capture_output=True, text=True, timeout=180)
+        files = sorted(tmp.glob("sub*.vtt"))
+        if r.returncode != 0 or not files:
+            return None
+        return files[0].read_text(errors="replace")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def media_duration(path):
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+                       capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def clip_offset(path, start_s, end_s):
+    """Recorte sem reencode comeca no keyframe anterior ao inicio pedido: estima o inicio real pelo fim."""
+    if start_s is None:
+        return 0.0
+    dur = media_duration(path)
+    if not dur or end_s is None:
+        return float(start_s)
+    return min(float(start_s), max(float(start_s) - 10, end_s - dur))
+
+
+def whisper_srt(job_id, media, label=""):
+    """Whisper uma vez so, saindo .srt e .txt. -> (srt, txt)"""
+    exe = whisper_bin()
+    if not exe:
+        raise RuntimeError("Sem legenda no site, e o Whisper nao esta instalado. "
+                           "No Terminal: brew install whisper-cpp")
+    model = ensure_whisper_model(job_id)
+    tmp = Path(tempfile.mkdtemp(prefix="cutter-whisper-"))
+    try:
+        set_job(job_id, progress=0, message=f"Extraindo o audio{label}...")
+        wav = tmp / "audio.wav"
+        r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(media), "-vn",
+                            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav)],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not wav.exists() or wav.stat().st_size < 1000:
+            raise RuntimeError("O arquivo nao tem audio - nao ha o que transcrever.")
+        # -ml/-sow: frases curtas, do tamanho de uma legenda (~2 linhas)
+        cmd = [exe, "-m", str(model), "-f", str(wav), "-l", "auto", "-osrt", "-otxt", "-ml", "84", "-sow",
+               "-of", str(tmp / "out"), "-pp", "-t", str(max(4, min(8, os.cpu_count() or 4)))]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        last = []
+        for line in proc.stdout:
+            last = (last + [line.rstrip()])[-10:]
+            m = re.search(r"progress\s*=\s*(\d+)%", line)
+            if m:
+                set_job(job_id, progress=float(m.group(1)), message=f"Gerando legenda com Whisper{label}... {m.group(1)}%")
+            m = re.search(r"auto-detected language: (\w+)", line)
+            if m:
+                set_job(job_id, message=f"Gerando legenda com Whisper{label} (idioma: {m.group(1)})...")
+        proc.wait()
+        srt, txt = tmp / "out.srt", tmp / "out.txt"
+        if proc.returncode != 0 or not srt.exists():
+            raise RuntimeError("O Whisper falhou:\n" + "\n".join(l for l in last if l.strip())[-800:])
+        cues = []
+        for block in re.split(r"\n\s*\n", srt.read_text(errors="replace").strip()):
+            lines = block.splitlines()
+            if len(lines) >= 3 and "-->" in lines[1]:
+                text = "\n".join(l.strip() for l in lines[2:] if l.strip())
+                if text and text != "[BLANK_AUDIO]":
+                    cues.append(f"{len(cues) + 1}\n{lines[1].strip()}\n{text}\n")
+        txt_lines = [l.strip() for l in txt.read_text(errors="replace").splitlines()] if txt.exists() else []
+        return "\n".join(cues), "\n".join(l for l in txt_lines if l and l != "[BLANK_AUDIO]").strip()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def subtitles_job(job_id, client, url, files, start_s, end_s, use_subs, want_txt, done_msg):
+    """Gera <arquivo>.srt (e o .txt, se pedido) ao lado de cada arquivo baixado."""
+    srts, txts, notes = [], [], []
+    for i, media in enumerate(files):
+        media = Path(media)
+        label = f" ({i + 1}/{len(files)})" if len(files) > 1 else ""
+        try:
+            srt = txt = None
+            source = "Whisper"
+            if use_subs and len(files) == 1:
+                set_job(job_id, progress=0, message="Procurando legendas do site...")
+                vtt = site_vtt(client, url)
+                if vtt:
+                    srt = vtt_to_srt(vtt, start_s, end_s, clip_offset(media, start_s, end_s)) or None
+                    txt = vtt_to_text(vtt, start_s, end_s) or None
+                    source = "legendas do site"
+            if not srt:
+                srt, txt = whisper_srt(job_id, media, label)
+                source = "Whisper"
+            if not srt:
+                raise RuntimeError("Nenhuma fala reconhecida no audio.")
+            out = media.with_suffix(".srt")
+            out.write_text(srt + "\n", encoding="utf-8")
+            srts.append(out)
+            if want_txt and txt:
+                t = media.with_suffix(".txt")
+                t.write_text(txt + "\n", encoding="utf-8")
+                txts.append(t)
+            notes.append(source)
+        except Exception as e:
+            notes.append(f"erro: {e}")
+    how = ", ".join(sorted(set(n for n in notes if not n.startswith("erro"))))
+    what = "legenda e transcricao" if want_txt else "legenda"
+    msg = f"{done_msg} · {what} via {how}" if srts else f"{done_msg} · legenda nao gerada"
+    errors = [n[6:] for n in notes if n.startswith("erro")]
+    set_job(job_id, status="done", progress=100, message=msg, srt_path=str(srts[0]) if srts else "",
+            txt_path=str(txts[0]) if txts else "", transcript_error="\n".join(errors))
+
+
+def run_with_subtitles(job_id, url, start_s, end_s, info, height, mode, output, fmt, bitrate, want_txt):
+    """Roda o download normal (video, audio ou sem som) num job interno e depois gera o .srt."""
+    inner = job_id + "_s"
+    if output in ("audio", "mute"):
+        target, args = run_media_job, (inner, url, start_s, end_s, info, height, mode, output, fmt, bitrate, False)
+    else:
+        target, args = run_download_job, (inner, url, start_s, end_s, info, height, mode, 0, False)
+    t = threading.Thread(target=target, daemon=True, args=args)
+    t.start()
+    while t.is_alive():
+        j = get_job(inner)
+        set_job(job_id, status="running", progress=j.get("progress", 0), message=j.get("message", "Baixando..."))
+        t.join(0.5)
+    j = get_job(inner)
+    with jobs_lock:
+        jobs.pop(inner, None)
+    if j.get("status") != "done":
+        set_job(job_id, status="error", error=j.get("error") or "Falha no download", login=j.get("login", False))
+        return
+    set_job(job_id, status="running", file_path=j.get("file_path"), files=j.get("files"), output=j.get("output", output))
+    live_now = str(info.get("is_live", "")).lower() == "true" or info.get("live_status") == "is_live"
+    client = "web_embedded" if live_now else (info.get("client") or "default")
+    subtitles_job(job_id, client, url, j.get("files") or [j["file_path"]], start_s, end_s,
+                  use_subs=not live_now, want_txt=want_txt, done_msg=j.get("message") or "Pronto!")
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -1103,14 +1303,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 set_job(job_id, status="queued", progress=0, message="Iniciando...")
                 transcribe = bool(data.get("transcribe"))
                 output = data.get("output", "video")
-                if output in ("audio", "mute") and mode != "record":
-                    fmt = data.get("audio_format") if data.get("audio_format") in AUDIO_FORMATS else "mp3"
-                    try:
-                        bitrate = int(data.get("audio_bitrate", 192))
-                    except (TypeError, ValueError):
-                        bitrate = 192
-                    if bitrate not in AUDIO_BITRATES:
-                        bitrate = 192
+                fmt = data.get("audio_format") if data.get("audio_format") in AUDIO_FORMATS else "mp3"
+                try:
+                    bitrate = int(data.get("audio_bitrate", 192))
+                except (TypeError, ValueError):
+                    bitrate = 192
+                if bitrate not in AUDIO_BITRATES:
+                    bitrate = 192
+                if data.get("srt") and mode != "record":
+                    t = threading.Thread(target=run_with_subtitles, daemon=True,
+                                         args=(job_id, url, start_s, end_s, info, height, mode,
+                                               output if output in ("audio", "mute") else "video",
+                                               fmt, bitrate, transcribe))
+                elif output in ("audio", "mute") and mode != "record":
                     t = threading.Thread(target=run_media_job, daemon=True,
                                          args=(job_id, url, start_s, end_s, info, height, mode, output,
                                                fmt, bitrate, transcribe))
@@ -1139,6 +1344,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     cfg["cookies_browser"] = data.get("cookies_browser", cfg["cookies_browser"])
                 save_config(cfg)
                 self._json(200, cfg)
+            elif path == "/api/reveal":
+                p = self._read_json().get("path", "")
+                if p and Path(p).exists():
+                    subprocess.Popen(["open", "-R", p])
+                    self._json(200, {"ok": True})
+                else:
+                    self._json(404, {"error": "Arquivo nao encontrado"})
             elif path == "/api/open-folder":
                 subprocess.Popen(["open", str(download_dir())])
                 self._json(200, {"ok": True})

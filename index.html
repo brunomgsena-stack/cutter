@@ -362,6 +362,8 @@
       <div id="trRow">
         <label class="toggle"><input type="checkbox" id="transcribe"> Gerar transcricao (.txt)</label>
         <div class="hint" id="trHint">Salva o texto ao lado do video, com o mesmo nome. Usa a legenda do site; sem legenda, transcreve no Mac com o Whisper.</div>
+        <label class="toggle"><input type="checkbox" id="srt"> Gerar legenda (.srt)</label>
+        <div class="hint">Legenda com tempo, ao lado do arquivo e com o mesmo nome: abre junto no VLC/IINA e importa em editores. Mesma origem da transcricao (site ou Whisper).</div>
       </div>
 
       <button class="btn" id="go" disabled>Baixar</button>
@@ -383,6 +385,7 @@
         <button class="btn ghost" id="openFolder">Mostrar pasta</button>
       </div>
       <button class="btn ghost" id="openTxt" style="margin-top:10px">Abrir transcricao</button>
+      <button class="btn ghost" id="openSrt" style="margin-top:10px">Mostrar legenda no Finder</button>
       <button class="btn ghost" id="newOne" style="margin-top:10px">Novo download</button>
     </div>
 
@@ -475,6 +478,11 @@ outPills.querySelectorAll("button").forEach(b => b.addEventListener("click", () 
 }));
 audioFormatEl.addEventListener("change", () => { store.set("audioFormat", audioFormatEl.value); applyOutput(currentMode()); });
 audioBitrateEl.addEventListener("change", () => store.set("audioBitrate", audioBitrateEl.value));
+const srtEl = $("srt");
+let doneSrtPath = null;
+srtEl.checked = store.get("srt", "0") === "1";
+srtEl.addEventListener("change", () => store.set("srt", srtEl.checked ? "1" : "0"));
+$("openSrt").addEventListener("click", () => doneSrtPath && post("/api/reveal", { path: doneSrtPath }));
 const effectiveOut = (mode) => mode === "record" ? "video" : outMode;
 function applyOutput(mode) {
   const out = effectiveOut(mode);
@@ -662,6 +670,7 @@ goBtn.addEventListener("click", async () => {
         back_min: mode === "record" ? backMin : 0,
         transcribe: mode !== "record" && trEl.checked,
         output: effectiveOut(mode),
+        srt: mode !== "record" && srtEl.checked,
         audio_format: audioFormatEl.value,
         audio_bitrate: parseInt(audioBitrateEl.value, 10),
       }),
@@ -698,6 +707,9 @@ async function pollProgress() {
       donePath.style.whiteSpace = "pre-wrap";
       doneTxtPath = data.txt_path || null;
       $("openFile").textContent = data.output === "audio" ? "Abrir audio" : "Abrir video";
+      doneSrtPath = data.srt_path || null;
+      $("openSrt").style.display = doneSrtPath ? "block" : "none";
+      if (doneSrtPath) donePath.textContent += "\n" + doneSrtPath;
       $("openTxt").style.display = doneTxtPath ? "block" : "none";
       $("doneNote").textContent = data.transcript_error ? "Transcricao: " + data.transcript_error : "";
       showOnly(doneEl);
