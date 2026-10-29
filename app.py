@@ -113,6 +113,14 @@ SITE_NAMES = {
 }
 
 
+def local_path(text):
+    """Caminho de arquivo colado ou arrastado: aceita file://, ~ e aspas."""
+    text = str(text).strip().strip("'\"")
+    if text.startswith("file://"):
+        text = unquote(urlparse(text).path)
+    return Path(os.path.expanduser(text))
+
+
 def normalize_url(url):
     url = url.strip()
     if url and not re.match(r"^[a-z][a-z0-9+.-]*://", url, re.IGNORECASE):
@@ -1138,6 +1146,35 @@ def whisper_srt(job_id, media, label=""):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def transcribe_files_job(job_id, paths):
+    """Arquivo ja baixado (arrastado pro app ou escolhido): gera <arquivo>.srt e <arquivo>.txt ao lado dele."""
+    if not whisper_bin():
+        set_job(job_id, status="error", error="Para gerar legenda de um arquivo, instale o Whisper. "
+                                              "No Terminal: brew install whisper-cpp")
+        return
+    done, errors = [], []
+    for i, media in enumerate(paths):
+        media = Path(media)
+        label = f" ({i + 1}/{len(paths)}: {media.name})" if len(paths) > 1 else ""
+        try:
+            srt, txt = whisper_srt(job_id, media, label)
+            if not srt.strip():
+                raise RuntimeError("Nenhuma fala reconhecida no audio.")
+            srt_path, txt_path = media.with_suffix(".srt"), media.with_suffix(".txt")
+            srt_path.write_text(srt, encoding="utf-8")
+            txt_path.write_text(txt + "\n", encoding="utf-8")
+            done.append((media, txt_path, srt_path))
+        except Exception as e:
+            errors.append(f"{media.name}: {e}" if len(paths) > 1 else str(e))
+    if not done:
+        set_job(job_id, status="error", error="\n\n".join(errors) or "Falha ao gerar a legenda")
+        return
+    media, txt_path, srt_path = done[0]
+    msg = "Legenda pronta" if len(done) == 1 else f"Legendas prontas ({len(done)} arquivos)"
+    set_job(job_id, status="done", progress=100, message=msg, file_path=str(media), txt_path=str(txt_path),
+            srt_path=str(srt_path), transcript_error="\n".join(errors), local=True)
+
+
 def subtitles_job(job_id, client, url, files, start_s, end_s, use_subs, want_txt, done_msg):
     """Gera <arquivo>.srt (e o .txt, se pedido) ao lado de cada arquivo baixado."""
     srts, txts, notes = [], [], []
@@ -1344,6 +1381,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     cfg["cookies_browser"] = data.get("cookies_browser", cfg["cookies_browser"])
                 save_config(cfg)
                 self._json(200, cfg)
+            elif path == "/api/transcribe-file":
+                # So a pagina do proprio Cutter pode pedir (outro site aberto no navegador nao).
+                origin = self.headers.get("Origin", "")
+                if origin and urlparse(origin).hostname not in ("localhost", "127.0.0.1"):
+                    return self._json(403, {"error": "Origem nao permitida"})
+                paths = [local_path(p) for p in self._read_json().get("paths", []) if str(p).strip()]
+                missing = [str(p) for p in paths if not p.is_file()]
+                if not paths or missing:
+                    return self._json(400, {"error": ("Arquivo nao encontrado: " + ", ".join(missing))
+                                            if missing else "Nenhum arquivo"})
+                job_id = uuid.uuid4().hex[:12]
+                set_job(job_id, status="queued", progress=0, message="Iniciando...")
+                threading.Thread(target=transcribe_files_job, args=(job_id, [str(p) for p in paths]),
+                                 daemon=True).start()
+                self._json(200, {"job_id": job_id})
             elif path == "/api/reveal":
                 p = self._read_json().get("path", "")
                 if p and Path(p).exists():

@@ -2,6 +2,7 @@
 // Build: mac/build.sh  (ou mac/build.sh --install)
 
 import AppKit
+import UniformTypeIdentifiers
 @preconcurrency import WebKit
 
 // app.py e index.html sao copiados para Contents/Resources pelo build.sh.
@@ -20,9 +21,43 @@ final class DragStrip: NSView {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate {
+// Arquivo arrastado pra janela: em vez do WKWebView abrir o arquivo, manda o caminho pra pagina.
+final class FileDropWebView: WKWebView {
+    var onFiles: (([URL]) -> Void)?
+    var onHover: ((Bool) -> Void)?
+
+    private func fileURLs(_ info: NSDraggingInfo) -> [URL] {
+        let opts: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        return info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: opts) as? [URL] ?? []
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if fileURLs(sender).isEmpty { return super.draggingEntered(sender) }
+        onHover?(true)
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        fileURLs(sender).isEmpty ? super.draggingUpdated(sender) : .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        onHover?(false)
+        super.draggingExited(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = fileURLs(sender)
+        if urls.isEmpty { return super.performDragOperation(sender) }
+        onHover?(false)
+        onFiles?(urls)
+        return true
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     var window: NSWindow!
-    var webView: WKWebView!
+    var webView: FileDropWebView!
     var server: Process?
     var quitting = false
 
@@ -108,8 +143,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     func buildWindow() {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()  // mantem as preferencias (localStorage) entre aberturas
+        config.userContentController.add(self, name: "cutter")  // window.webkit.messageHandlers.cutter
 
-        webView = WKWebView(frame: .zero, configuration: config)
+        webView = FileDropWebView(frame: .zero, configuration: config)
+        webView.onFiles = { [weak self] urls in self?.sendFiles(urls) }
+        webView.onHover = { [weak self] on in
+            self?.webView.evaluateJavaScript("window.cutterDragHover && window.cutterDragHover(\(on))")
+        }
         webView.uiDelegate = self
         webView.navigationDelegate = self
         webView.setValue(false, forKey: "drawsBackground")  // sem flash branco antes da pagina carregar
@@ -138,6 +178,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         if !window.setFrameUsingName("CutterMainWindow") { window.center() }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - Arquivos locais (arrastar ou "Escolher arquivo") -> transcricao
+
+    func sendFiles(_ urls: [URL]) {
+        let paths = urls.filter { $0.isFileURL }.map { $0.path }
+        guard !paths.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: paths),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.cutterFiles && window.cutterFiles(\(json))")
+    }
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any], body["action"] as? String == "pickFiles" else { return }
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.movie, .audio, .mpeg4Movie, .quickTimeMovie]
+        panel.message = "Escolha videos ou audios para gerar a legenda (.txt e .srt)"
+        panel.prompt = "Transcrever"
+        panel.beginSheetModal(for: window) { [weak self] response in
+            if response == .OK { self?.sendFiles(panel.urls) }
+        }
     }
 
     func showFatal(_ text: String) {

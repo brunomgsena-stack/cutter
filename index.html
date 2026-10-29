@@ -95,6 +95,15 @@
   .msg { margin: 10px 4px 0; font-size: 13px; color: var(--dim); min-height: 18px; }
   .msg.err { color: #ff8a8a; white-space: pre-wrap; }
   .btn.login-btn:not(.show) { display: none; }
+  .local-hint { margin: 10px 4px 0; font-size: 12px; color: var(--faint); }
+  .local-hint a { color: var(--dim); text-decoration: underline; cursor: pointer; }
+  .local-hint a:hover { color: var(--text); }
+  #urlLocal { margin-top: 10px; }
+  .drop-overlay { position: fixed; inset: 12px; z-index: 50; display: none; align-items: center; justify-content: center;
+    border: 2px dashed rgba(255,255,255,0.35); border-radius: 22px; background: rgba(14,14,16,0.82);
+    color: var(--text); font-size: 17px; font-weight: 600; text-align: center; pointer-events: none; }
+  .drop-overlay.show { display: flex; }
+  .drop-overlay small { display: block; margin-top: 6px; font-size: 13px; font-weight: 400; color: var(--dim); }
   .toggle { display: flex; align-items: center; gap: 9px; margin: 16px 4px 0; font-size: 14px; color: var(--text); cursor: pointer; }
   .toggle input { width: 16px; height: 16px; margin: 0; accent-color: #ff453a; cursor: pointer; }
   .result .note { margin-top: 8px; font-size: 12px; color: #ff8a8a; white-space: pre-wrap; }
@@ -264,6 +273,8 @@
     <input id="url" type="url" placeholder="YouTube, Instagram, TikTok, X, Facebook, Vimeo..." autocomplete="off" spellcheck="false">
     <div class="msg" id="urlMsg"></div>
     <button type="button" class="btn ghost login-btn" id="urlLogin">Usar cookies do navegador</button>
+    <button type="button" class="btn login-btn" id="urlLocal">Gerar legenda deste arquivo</button>
+    <div class="local-hint" id="localHint">Ja tem o video no Mac? Arraste o arquivo para esta janela e o Cutter gera a legenda (.srt) e o texto (.txt) ao lado dele<span id="pickWrap"> · <a id="pickFile">Escolher arquivo</a></span>.</div>
 
     <div class="preview" id="preview">
       <div class="thumb" id="thumb">
@@ -551,12 +562,21 @@ function resetPreview() {
   art.classList.remove("show");
 }
 
+// Caminho de arquivo do Mac colado no campo (ex.: /Users/.../video.mp4 ou file://...)
+const isLocalPath = (s) => /^(\/|~\/|file:\/\/)/i.test(s) || /^['"]\//.test(s);
+
 urlEl.addEventListener("input", () => {
   clearTimeout(infoFetchTimer);
   resetPreview();
+  urlLocal.classList.remove("show");
   urlMsg.textContent = ""; urlMsg.className = "msg";
   const url = urlEl.value.trim();
   if (!url) return;
+  if (isLocalPath(url)) {
+    urlMsg.textContent = "Arquivo do Mac: " + url.replace(/^.*\//, "").replace(/['"]$/, "");
+    urlLocal.classList.add("show");
+    return;
+  }
   if (!/^(https?:\/\/)?[^\s\/]+\.[a-z]{2,}(\/|$)/i.test(url)) {
     urlMsg.textContent = "Isso nao parece um link. Cole o endereco do video (ex.: https://www.instagram.com/reel/...).";
     urlMsg.className = "msg err";
@@ -706,7 +726,7 @@ async function pollProgress() {
       donePath.textContent = data.file_path + (data.txt_path ? "\n" + data.txt_path : "");
       donePath.style.whiteSpace = "pre-wrap";
       doneTxtPath = data.txt_path || null;
-      $("openFile").textContent = data.output === "audio" ? "Abrir audio" : "Abrir video";
+      $("openFile").textContent = data.local ? "Abrir arquivo" : data.output === "audio" ? "Abrir audio" : "Abrir video";
       doneSrtPath = data.srt_path || null;
       $("openSrt").style.display = doneSrtPath ? "block" : "none";
       if (doneSrtPath) donePath.textContent += "\n" + doneSrtPath;
@@ -736,7 +756,8 @@ stopBtn.addEventListener("click", async () => {
 
 const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
 $("openFile").addEventListener("click", () => doneFilePath && post("/api/open", { path: doneFilePath }));
-$("openFolder").addEventListener("click", () => post("/api/open-folder"));
+// Mostra o proprio arquivo no Finder (serve tambem pra arquivo local fora da pasta de downloads).
+$("openFolder").addEventListener("click", () => doneFilePath ? post("/api/reveal", { path: doneFilePath }) : post("/api/open-folder"));
 $("openTxt").addEventListener("click", () => doneTxtPath && post("/api/open", { path: doneTxtPath }));
 $("folderLink").addEventListener("click", () => post("/api/open-folder"));
 $("newOne").addEventListener("click", () => {
@@ -746,6 +767,54 @@ $("newOne").addEventListener("click", () => {
   resetPreview();
   urlEl.focus();
 });
+// ---- Legenda de arquivo ja baixado ----
+// No app, a casca nativa intercepta o arquivo arrastado e chama window.cutterFiles([caminhos]);
+// "Escolher arquivo" abre o seletor do macOS pelo mesmo caminho.
+const urlLocal = $("urlLocal");
+const nativeBridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.cutter;
+$("pickFile").addEventListener("click", () => nativeBridge && nativeBridge.postMessage({ action: "pickFiles" }));
+if (!nativeBridge) {  // aberto no navegador: sem arrastar/escolher, so colando o caminho
+  $("localHint").textContent = "Ja tem o video no Mac? Cole o caminho do arquivo acima (ex.: /Users/voce/Downloads/video.mp4) para gerar a legenda (.srt) e o texto (.txt).";
+}
+urlLocal.addEventListener("click", () => startLocal([urlEl.value.trim()]));
+const dropOverlay = document.createElement("div");
+dropOverlay.className = "drop-overlay";
+dropOverlay.innerHTML = "<div>Solte para gerar a legenda<small>.srt e .txt ao lado do arquivo</small></div>";
+document.body.append(dropOverlay);
+window.cutterDragHover = (on) => dropOverlay.classList.toggle("show", !!on && !statusEl.classList.contains("show"));
+window.cutterFiles = (paths) => {
+  dropOverlay.classList.remove("show");
+  if (!paths || !paths.length) return;
+  if (statusEl.classList.contains("show")) {  // nao atrapalha um download em andamento
+    alert("Espere o trabalho atual terminar para gerar outra legenda.");
+    return;
+  }
+  urlEl.value = paths.length === 1 ? paths[0] : "";
+  resetPreview();
+  urlLocal.classList.remove("show");
+  urlMsg.textContent = paths.length > 1 ? `${paths.length} arquivos` : ""; urlMsg.className = "msg";
+  startLocal(paths);
+};
+
+async function startLocal(paths) {
+  urlLocal.classList.remove("show");
+  showOnly(statusEl);
+  bar.classList.remove("rec");
+  recLine.style.display = "none";
+  stopBtn.style.display = "none";
+  fillEl.style.width = "0%";
+  pctEl.textContent = "Preparando...";
+  try {
+    const r = await post("/api/transcribe-file", { paths });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "Falha");
+    currentJobId = data.job_id;
+    polling = setInterval(pollProgress, 700);
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
 document.addEventListener("dragover", (e) => {
   if (e.dataTransfer && [...e.dataTransfer.types].some(t => t === "text/uri-list" || t === "text/plain")) e.preventDefault();
 });
