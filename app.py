@@ -110,6 +110,7 @@ SITE_NAMES = {
     "tiktok.com": "TikTok", "x.com": "X", "twitter.com": "X", "facebook.com": "Facebook",
     "fb.watch": "Facebook", "vimeo.com": "Vimeo", "twitch.tv": "Twitch", "reddit.com": "Reddit",
     "threads.net": "Threads", "threads.com": "Threads", "kwai.com": "Kwai", "dailymotion.com": "Dailymotion",
+    "drive.google.com": "Google Drive", "docs.google.com": "Google Drive", "drive.usercontent.google.com": "Google Drive",
 }
 
 
@@ -136,6 +137,21 @@ def url_host(url):
 def is_youtube(url):
     host = url_host(url)
     return any(host == h or host.endswith("." + h) for h in YOUTUBE_HOSTS)
+
+
+def is_google_drive(url):
+    return url_host(url) in ("drive.google.com", "docs.google.com", "drive.usercontent.google.com")
+
+
+def job_title(title, info, url):
+    """Instagram/TikTok repetem titulos ("Video by fulano"): o id evita sobrescrever outro download.
+    No Drive o titulo ja e o nome do arquivo, entao basta um pedaco do id (bem longo)."""
+    vid = str(info.get("id") or "")
+    if is_google_drive(url):
+        vid = vid[:8]
+    if vid and vid != "NA" and vid not in title:
+        return f"{title[:40]} {vid}"
+    return title
 
 
 def site_name(url):
@@ -174,6 +190,13 @@ FRIENDLY_ERRORS = [
     (r"IP address is blocked",
      "O {site} bloqueou este post para o seu IP ou regiao. As vezes funciona usando os cookies de um "
      "navegador logado no {site} (Ajustes); senao, tente outra rede.", True),
+    (r"GoogleDrive:Folder",
+     "Nao consegui abrir esta pasta do Google Drive: ela precisa estar compartilhada como "
+     "\"Qualquer pessoa com o link\". Se preferir, abra o video na pasta e cole o link dele.", False),
+    (r"\[GoogleDrive\].*HTTP Error (401|403|404)",
+     "O Google Drive nao liberou este arquivo: ele pode ser privado, ter sido apagado ou o link esta errado.\n"
+     "Peca ao dono para compartilhar como \"Qualquer pessoa com o link\". Para um arquivo restrito, tente tambem:\n"
+     + LOGIN_HINT, True),
     (r"Cannot parse data",
      "O {site} nao liberou este video sem login (comum no Facebook e em posts privados).\n" + LOGIN_HINT, True),
     (r"log ?in|logged.in|sign.?in|authenticat|account credentials|--cookies|private|"
@@ -206,7 +229,7 @@ class YtdlpError(RuntimeError):
 def explain_error(raw, url=""):
     """-> (mensagem, precisa_login). Olha primeiro as linhas de ERROR (WARNINGs falam de cookies a toa)."""
     lines = raw.splitlines()
-    focus = "\n".join([l for l in lines if "ERROR" in l] or lines)
+    focus = "\n".join([l for l in lines if "ERROR" in l or "GoogleDrive:Folder" in l] or lines)
     site = site_name(url) if url else "site"
     for pattern, msg, login in FRIENDLY_ERRORS:
         if re.search(pattern, focus, re.IGNORECASE):
@@ -353,6 +376,8 @@ def download_full(job_id, client, url, title, height, count=1):
     base = sanitize_filename(title)[:80].rstrip('_-')
     out_path = download_dir() / f"{base}.mp4"
     out_tmpl = str(download_dir() / f"{base}_%(playlist_index)02d.mp4") if count > 1 else str(out_path)
+    if is_google_drive(url):
+        return download_full_drive(job_id, client, url, out_tmpl, height, count)
     cmd = ytdlp_cmd(
         client, "--newline",
         *format_args(height),
@@ -370,6 +395,28 @@ def download_full(job_id, client, url, title, height, count=1):
             return
     finish_download(job_id, [out_path])
 
+
+def download_full_drive(job_id, client, url, out_tmpl, height, count):
+    """O original do Drive pode ser .mov/.mkv: mantem a extensao real e pergunta ao yt-dlp onde salvou.
+    "Melhor" = arquivo original, nao a copia recomprimida. Sobrescreve pra trocar de qualidade de verdade."""
+    fmt = format_args(height) if height else ["-f", "source/bv*+ba/b"]
+    tmp = Path(tempfile.mkdtemp(prefix="cutter-drive-"))
+    saved_list = tmp / "saved.txt"
+    try:
+        run_ytdlp_streaming(ytdlp_cmd(
+            client, "--newline", *fmt,
+            "--merge-output-format", "mp4",
+            "--force-overwrites",
+            "--print-to-file", "after_move:filepath", str(saved_list),
+            "-o", str(Path(out_tmpl).with_suffix(".%(ext)s")),
+            url,
+        ), lambda pct: set_job(job_id, progress=pct, message=f"Baixando video... {pct:.0f}%"))
+        files = [Path(l) for l in saved_list.read_text().splitlines() if l.strip()] if saved_list.exists() else []
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if not files:
+        raise RuntimeError("O Google Drive nao entregou o arquivo.")
+    finish_download(job_id, files, f"Pronto! {len(files)} videos salvos" if len(files) > 1 else "Pronto!")
 
 
 def download_post_live(job_id, client, url, start_s, end_s, title, height):
@@ -825,10 +872,7 @@ def run_download_job(job_id, url, start_s, end_s, info, height, mode="clip", bac
     title = info.get("title") or "video"
     youtube = is_youtube(url)
     if not youtube:
-        # Instagram/TikTok repetem titulos ("Video by fulano"): o id evita sobrescrever outro download.
-        vid = str(info.get("id") or "")
-        if vid and vid != "NA" and vid not in title:
-            title = f"{title[:40]} {vid}"
+        title = job_title(title, info, url)
         if is_live or live_status == "is_live":
             set_job(job_id, status="error",
                     error=f"Gravar ou recortar live em andamento so funciona no YouTube por enquanto "
@@ -986,9 +1030,7 @@ def run_media_job(job_id, url, start_s, end_s, info, height, mode, output, fmt, 
         return run_then_convert(job_id, url, start_s, end_s, info, height, mode, output, fmt, bitrate, transcribe)
     title = info.get("title") or "audio"
     if not is_youtube(url):
-        vid = str(info.get("id") or "")
-        if vid and vid != "NA" and vid not in title:
-            title = f"{title[:40]} {vid}"
+        title = job_title(title, info, url)
     try:
         count = int(info.get("count") or 1)
     except (TypeError, ValueError):
@@ -1294,7 +1336,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 except ValueError:
                     dur_s = 0
                 self._json(200, {
-                    "title": info.get("title", ""),
+                    # No Drive o titulo e o nome do arquivo: sem a extensao, nao fica "video.mp4.mp4".
+                    "title": re.sub(r"\.[A-Za-z0-9]{2,4}$", "", info.get("title", "")) if is_google_drive(url)
+                    else info.get("title", ""),
                     "duration_seconds": dur_s,
                     "duration_hms": seconds_to_hhmmss(dur_s) if dur_s else "",
                     "is_live": info.get("is_live", "").lower() == "true",

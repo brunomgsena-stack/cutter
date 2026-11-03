@@ -1,6 +1,6 @@
 # Cutter
 
-App para macOS que baixa vídeos do YouTube, Instagram, TikTok, X/Twitter, Facebook, Vimeo e de [qualquer site que o yt-dlp suporte](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md), recorta trechos e grava lives do YouTube — inclusive voltando alguns minutos no tempo e seguindo ao vivo, sem emenda.
+App para macOS que baixa vídeos do YouTube, Instagram, TikTok, X/Twitter, Facebook, Vimeo, Google Drive e de [qualquer site que o yt-dlp suporte](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md), recorta trechos e grava lives do YouTube — inclusive voltando alguns minutos no tempo e seguindo ao vivo, sem emenda.
 
 > **English summary:** Cutter is a small macOS app (Swift + WKWebView shell around a pure-Python local server) built on top of [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [ffmpeg](https://ffmpeg.org). It downloads full videos from YouTube, Instagram, TikTok, X and any other site yt-dlp supports, cuts clips from videos and live streams, and records live streams starting up to 1 hour in the past (using YouTube's DVR window) and continuing live until you stop.
 
@@ -8,7 +8,7 @@ App para macOS que baixa vídeos do YouTube, Instagram, TikTok, X/Twitter, Faceb
 
 ## O que faz
 
-- **Vídeo inteiro** — baixa o vídeo completo (ou a live já encerrada). Posts com vários vídeos (carrossel do Instagram) salvam todos, numerados.
+- **Vídeo inteiro** — baixa o vídeo completo (ou a live já encerrada). No Google Drive, o arquivo precisa estar compartilhado como "Qualquer pessoa com o link"; em "Melhor disponível", baixa o arquivo original, sem a recompressão do Drive. Posts com vários vídeos (carrossel do Instagram) salvam todos, numerados.
 - **Trecho** — informe início e fim (`HH:MM:SS`) e baixa só aquele pedaço; funciona em vídeos, lives encerradas e lives em andamento.
 - **Gravar ao vivo** (só YouTube) — grava a live a partir de agora **ou voltando 5, 10, 30 ou 60 minutos**, e continua até você parar ou a live acabar. Útil para quando você só percebe que precisava gravar depois que a parte importante já começou (sessões legislativas, palestras, eventos).
 - **Transcrição (.txt)** — marque "Gerar transcrição" e o Cutter salva um `.txt` de texto puro ao lado do vídeo, com o mesmo nome. Usa a legenda do próprio site (manual, depois automática, no idioma original); sem legenda (comum no Instagram e no TikTok), transcreve no Mac com o [whisper.cpp](https://github.com/ggml-org/whisper.cpp), detectando o idioma. Funciona também para trechos.
