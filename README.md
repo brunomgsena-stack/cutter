@@ -76,3 +76,9 @@ Este projeto não é afiliado ao YouTube, Google, Meta, TikTok, X nem a nenhum d
 ## Licença
 
 [MIT](LICENSE)
+
+## Lotes de links e arquivos
+
+Abra **Em lote**, cole um link por linha (ate 100), ou arraste varios arquivos do Mac. Escolha **So baixar**, **Video + transcricao** ou **So transcricao (TXT)**. SRT e opcional. A fila processa um item por vez e mostra resultados e erros individuais. Mantenha o app aberto ate concluir; a fila nao e retomada apos encerrar o app.
+
+Em **So transcricao**, a midia baixada pelo lote e apagada apenas depois de salvar e conferir os arquivos de texto solicitados. Arquivos locais sao preservados por padrao; marque a opcao especifica para envia-los a Lixeira apos sucesso. Falhas preservam a midia. Downloads ficam em uma pasta `Lote-...` no destino configurado; arquivos locais recebem os textos ao lado do original. Transcricoes anteriores nao sao sobrescritas.

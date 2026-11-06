@@ -1282,6 +1282,128 @@ def run_with_subtitles(job_id, url, start_s, end_s, info, height, mode, output, 
                   use_subs=not live_now, want_txt=want_txt, done_msg=j.get("message") or "Pronto!")
 
 
+# Batch jobs are sequential, including between separate submitted batches.
+batch_lock = threading.Lock()
+
+
+def trash_media(media):
+    """Recoverable removal, never overwrite a previous item in Trash."""
+    media = Path(media)
+    trash = Path.home() / '.Trash'
+    trash.mkdir(exist_ok=True)
+    target = trash / (media.stem + '-' + uuid.uuid4().hex[:10] + media.suffix)
+    shutil.move(str(media), str(target))
+    return target
+
+
+def batch_sidecars(media, txt, srt, want_srt):
+    if not txt or not txt.strip():
+        raise RuntimeError('Nenhuma fala reconhecida; o original foi mantido.')
+    if want_srt and (not srt or not srt.strip()):
+        raise RuntimeError('Legenda vazia; o original foi mantido.')
+    stem = media.with_suffix('')
+    if Path(str(stem) + '.txt').exists() or Path(str(stem) + '.srt').exists():
+        stem = media.parent / (media.stem + '-transcricao-' + uuid.uuid4().hex[:8])
+    # Append instead of with_suffix: filenames can contain dots.
+    outputs = [(Path(str(stem) + '.txt'), txt)]
+    if want_srt:
+        outputs.append((Path(str(stem) + '.srt'), srt))
+    for path, content in outputs:
+        temp = path.with_name('.' + path.name + '.' + uuid.uuid4().hex + '.tmp')
+        try:
+            with temp.open('x', encoding='utf-8') as f:
+                f.write(content.strip() + '\n')
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp, path)
+            if not path.read_text(encoding='utf-8').strip():
+                raise RuntimeError('Nao foi possivel conferir a transcricao salva.')
+        finally:
+            temp.unlink(missing_ok=True)
+    return str(outputs[0][0]), str(outputs[1][0]) if want_srt else ''
+
+
+def batch_job(job_id, entries, options):
+    mode = options.get('mode', 'both')
+    want_srt = bool(options.get('srt', True))
+    rows = [{'source': e, 'status': 'queued'} for e in entries]
+    set_job(job_id, status='queued', items=[dict(r) for r in rows], message='Aguardando a fila...', batch=True)
+    with batch_lock:
+        root = None
+        for i, entry in enumerate(entries):
+            row = rows[i]
+            row['status'] = 'running'
+            set_job(job_id, status='running', items=[dict(r) for r in rows], progress=0,
+                    message=f'Item {i + 1} de {len(entries)}', current=i + 1, total=len(entries))
+            try:
+                remote = urlparse(entry).scheme in ('http', 'https')
+                client, url = 'default', entry
+                if remote:
+                    info = run_ytdlp_info(url)
+                    if str(info.get('is_live')).lower() == 'true' or info.get('live_status') == 'is_live':
+                        raise RuntimeError('Live em andamento: use o download individual.')
+                    client = info.get('client') or 'default'
+                    if root is None:
+                        root = download_dir() / ('Lote-' + time.strftime('%Y-%m-%d_%H-%M-%S') + '-' + job_id[:6])
+                        root.mkdir(parents=True, exist_ok=True)
+                    folder = root / f'{i + 1:02d}'
+                    folder.mkdir()
+                    manifest = folder / '.saved.txt'
+                    quality = options.get('quality', 720)
+                    fmt = ['-f', 'source/bv*+ba/b'] if is_google_drive(url) and not quality else format_args(quality)
+                    # Unique folder per input; multiple videos in one post get their own IDs.
+                    cmd = ytdlp_cmd(client, '--newline', *fmt, '--merge-output-format', 'mp4',
+                                    '--print-to-file', 'after_move:filepath', str(manifest),
+                                    '-o', str(folder / '%(title).80s_%(id)s.%(ext)s'), url)
+                    run_ytdlp_streaming(cmd, lambda pct: set_job(job_id, progress=pct, message=f'Baixando {i + 1}/{len(entries)}... {pct:.0f}%'))
+                    media_files = [Path(p) for p in manifest.read_text().splitlines() if p.strip()] if manifest.exists() else []
+                    manifest.unlink(missing_ok=True)
+                    if not media_files or not all(p.is_file() for p in media_files):
+                        raise RuntimeError('O site nao entregou os arquivos.')
+                else:
+                    media = local_path(entry).absolute()
+                    if not media.is_file() or media.is_symlink():
+                        raise RuntimeError('Arquivo nao encontrado ou atalho nao suportado.')
+                    if media.suffix.lower() in ('.txt', '.srt', '.vtt'):
+                        raise RuntimeError('Selecione um video ou audio, nao uma legenda.')
+                    media_files = [media]
+                row['outputs'] = []
+                for media in media_files:
+                    output = {'file_path': str(media)}
+                    row['outputs'].append(output)
+                    if mode != 'download' or not remote:
+                        txt = srt = None
+                        if remote and len(media_files) == 1:
+                            set_job(job_id, message=f'Buscando legendas {i + 1}/{len(entries)}...')
+                            try:
+                                vtt = site_vtt(client, url)
+                                if vtt:
+                                    txt, srt = vtt_to_text(vtt), vtt_to_srt(vtt)
+                            except Exception:
+                                pass  # Site captions can fail while downloaded audio is valid.
+                        if not txt or (want_srt and not srt):
+                            srt, txt = whisper_srt(job_id, media, f' ({i + 1}/{len(entries)})')
+                        output['txt_path'], output['srt_path'] = batch_sidecars(media, txt, srt, want_srt)
+                        if mode == 'text' and (remote or options.get('remove_local', False)):
+                            if remote:
+                                # Only delete media created in this batch, after all requested sidecars passed validation.
+                                if not media.resolve().is_relative_to(root.resolve()):
+                                    raise RuntimeError('Arquivo fora da pasta do lote; mantido.')
+                                media.unlink()
+                            else:
+                                trash_media(media)
+                            output['file_path'] = ''
+                    row.update({k: v for k, v in output.items() if k.endswith('_path')})
+                row['status'] = 'done'
+            except Exception as exc:
+                row['status'] = 'error'
+                row['error'] = explain_error(str(exc), entry)[0] if isinstance(exc, YtdlpError) else str(exc)
+            set_job(job_id, items=[dict(r) for r in rows], progress=100 * (i + 1) / len(entries))
+        successes = sum(r['status'] == 'done' for r in rows)
+        set_job(job_id, status='done', progress=100, items=rows,
+                message=f'Lote concluido: {successes} de {len(rows)} itens; {len(rows) - successes} com erro.')
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -1321,7 +1443,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         try:
-            if path == "/api/info":
+            if path == "/api/batch":
+                origin = self.headers.get("Origin", "")
+                if origin and origin != "http://" + self.headers.get("Host", ""):
+                    return self._json(403, {"error": "Origem nao permitida"})
+                if "application/json" not in self.headers.get("Content-Type", ""):
+                    return self._json(415, {"error": "Use JSON"})
+                data = self._read_json()
+                entries = data.get("entries")
+                if not isinstance(entries, list) or not 1 <= len(entries) <= 100 or not all(isinstance(e, str) and e.strip() for e in entries):
+                    return self._json(400, {"error": "Informe de 1 a 100 links ou arquivos."})
+                entries = list(dict.fromkeys(e.strip() for e in entries))
+                mode = data.get("mode", "both")
+                if mode not in ("download", "both", "text"):
+                    return self._json(400, {"error": "Modo invalido"})
+                quality = data.get("quality", 720)
+                if quality not in QUALITIES:
+                    quality = 720
+                options = dict(mode=mode, quality=quality, srt=bool(data.get("srt", True)),
+                               remove_local=bool(data.get("remove_local", False)))
+                job_id = uuid.uuid4().hex[:12]
+                set_job(job_id, status="queued", batch=True, items=[], message="Iniciando...")
+                threading.Thread(target=batch_job, args=(job_id, entries, options), daemon=True).start()
+                self._json(200, {"job_id": job_id})
+            elif path == "/api/info":
                 data = self._read_json()
                 url = normalize_url(data.get("url", ""))
                 if not url:

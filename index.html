@@ -94,6 +94,10 @@
 
   .msg { margin: 10px 4px 0; font-size: 13px; color: var(--dim); min-height: 18px; }
   .msg.err { color: #ff8a8a; white-space: pre-wrap; }
+  #batchPanel { margin-top: 16px; }
+  #batchPanel textarea { box-sizing: border-box; width: 100%; min-height: 120px; background: var(--well); color: var(--text); border: 1px solid var(--glass-border); border-radius: 10px; padding: 12px; font: inherit; }
+  .batch-item { padding: 12px 0; border-bottom: 1px solid var(--glass-border); overflow-wrap: anywhere; font-size: 13px; white-space: pre-wrap; }
+  .batch-item button { margin: 8px 8px 0 0; padding: 6px 10px; cursor: pointer; }
   .btn.login-btn:not(.show) { display: none; }
   .local-hint { margin: 10px 4px 0; font-size: 12px; color: var(--faint); }
   .local-hint a { color: var(--dim); text-decoration: underline; cursor: pointer; }
@@ -274,7 +278,25 @@
     <div class="msg" id="urlMsg"></div>
     <button type="button" class="btn ghost login-btn" id="urlLogin">Usar cookies do navegador</button>
     <button type="button" class="btn login-btn" id="urlLocal">Gerar legenda deste arquivo</button>
-    <div class="local-hint" id="localHint">Ja tem o video no Mac? Arraste o arquivo para esta janela e o Cutter gera a legenda (.srt) e o texto (.txt) ao lado dele<span id="pickWrap"> · <a id="pickFile">Escolher arquivo</a></span>.</div>
+    <div class="local-hint" id="localHint">Ja tem o video no Mac? Arraste os arquivos para montar a fila de transcricao<span id="pickWrap"> · <a id="pickFile">Escolher arquivo</a></span>.</div>
+
+    <details id="batchPanel">
+      <summary>Em lote · vários links ou arquivos</summary>
+      <div class="hint">Cole um link por linha. Para arquivos do Mac, arraste vários para a janela ou use “Escolher arquivo”.</div>
+      <textarea id="batchEntries" placeholder="https://www.instagram.com/reel/...&#10;https://www.instagram.com/reel/..."></textarea>
+      <label for="batchMode">O que salvar</label>
+      <select id="batchMode">
+        <option value="text">Só transcrição (TXT)</option>
+        <option value="both">Vídeo + transcrição</option>
+        <option value="download">Só baixar os vídeos</option>
+      </select>
+      <label class="toggle"><input type="checkbox" id="batchSrt"> Gerar também legenda SRT</label>
+      <label class="toggle" id="removeLocalRow"><input type="checkbox" id="removeLocal"> Enviar os originais do Mac à Lixeira após transcrever</label>
+      <div class="hint" id="batchHint">Em “Só transcrição”, a mídia baixada é apagada depois que o texto é salvo. Se ocorrer um erro, ela é mantida.</div>
+      <button class="btn" id="batchStart">Iniciar lote</button>
+      <div class="msg" id="batchMessage" aria-live="polite"></div>
+      <div id="batchResults"></div>
+    </details>
 
     <div class="preview" id="preview">
       <div class="thumb" id="thumb">
@@ -671,6 +693,7 @@ function showOnly(el) {
 }
 
 goBtn.addEventListener("click", async () => {
+  if (polling) return;
   goBtn.disabled = true;
   const mode = currentMode();
   showOnly(statusEl);
@@ -709,6 +732,13 @@ async function pollProgress() {
   try {
     const r = await fetch(`/api/progress/${currentJobId}`);
     const data = await r.json();
+    if (data.status === "unknown" && sessionStorage.getItem("cutterBatchJob")) {
+      stopPolling(); sessionStorage.removeItem("cutterBatchJob");
+      $("batchStart").disabled=false; showOnly(null);
+      $("batchMessage").textContent="O app foi reiniciado. Confira os arquivos salvos e inicie os itens pendentes novamente.";
+      return;
+    }
+    if (data.batch) { renderBatch(data); return; }
     if (data.recording && data.status === "running") {
       const m = /Gravando\.\.\. (.+)/.exec(data.message || "");
       recText.textContent = m ? `Gravando · ${m[1]}` : (data.message || "Gravando");
@@ -779,40 +809,86 @@ if (!nativeBridge) {  // aberto no navegador: sem arrastar/escolher, so colando 
 urlLocal.addEventListener("click", () => startLocal([urlEl.value.trim()]));
 const dropOverlay = document.createElement("div");
 dropOverlay.className = "drop-overlay";
-dropOverlay.innerHTML = "<div>Solte para gerar a legenda<small>.srt e .txt ao lado do arquivo</small></div>";
+dropOverlay.innerHTML = "<div>Solte para adicionar à fila<small>Escolha TXT ou TXT + SRT antes de começar</small></div>";
 document.body.append(dropOverlay);
 window.cutterDragHover = (on) => dropOverlay.classList.toggle("show", !!on && !statusEl.classList.contains("show"));
 window.cutterFiles = (paths) => {
   dropOverlay.classList.remove("show");
   if (!paths || !paths.length) return;
-  if (statusEl.classList.contains("show")) {  // nao atrapalha um download em andamento
-    alert("Espere o trabalho atual terminar para gerar outra legenda.");
-    return;
-  }
-  urlEl.value = paths.length === 1 ? paths[0] : "";
-  resetPreview();
-  urlLocal.classList.remove("show");
-  urlMsg.textContent = paths.length > 1 ? `${paths.length} arquivos` : ""; urlMsg.className = "msg";
-  startLocal(paths);
+  stageBatch(paths);
 };
-
-async function startLocal(paths) {
-  urlLocal.classList.remove("show");
+function stageBatch(entries) {
+  const field = $("batchEntries");
+  field.value = [...new Set([...field.value.split(/\r?\n/).filter(Boolean), ...entries])].join("\n");
+  $("batchPanel").open = true;
+  $("batchPanel").scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+async function startLocal(paths) { stageBatch(paths); }
+const batchBusy = () => !!polling;
+function batchOptions() {
+  const mode = $("batchMode").value;
+  $("batchSrt").disabled = mode === "download";
+  $("removeLocalRow").style.display = mode === "text" ? "flex" : "none";
+}
+$("batchMode").addEventListener("change", batchOptions);
+batchOptions();
+$("batchStart").addEventListener("click", async () => {
+  if (batchBusy()) { $("batchMessage").textContent = "Espere o trabalho atual terminar."; return; }
+  const entries = $("batchEntries").value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  if (!entries.length) { $("batchMessage").textContent = "Cole os links ou escolha arquivos primeiro."; return; }
+  $("batchStart").disabled = true;
+  $("batchResults").replaceChildren();
   showOnly(statusEl);
-  bar.classList.remove("rec");
-  recLine.style.display = "none";
-  stopBtn.style.display = "none";
-  fillEl.style.width = "0%";
-  pctEl.textContent = "Preparando...";
+  bar.classList.remove("rec"); recLine.style.display = "none"; stopBtn.style.display = "none";
+  pctEl.textContent = "Preparando lote...";
   try {
-    const r = await post("/api/transcribe-file", { paths });
+    const r = await post("/api/batch", {entries, mode:$("batchMode").value, srt:$("batchSrt").checked,
+      remove_local:$("removeLocal").checked, quality:parseInt(qualityEl.value,10)});
     const data = await r.json();
-    if (!r.ok) throw new Error(data.error || "Falha");
+    if (!r.ok) throw new Error(data.error || "Falha ao iniciar");
     currentJobId = data.job_id;
-    polling = setInterval(pollProgress, 700);
-  } catch (e) {
-    showError(e.message);
+    sessionStorage.setItem("cutterBatchJob", currentJobId);
+    polling = setInterval(pollProgress,700);
+  } catch(e) {
+    $("batchStart").disabled = false; showOnly(null); $("batchMessage").textContent = e.message;
   }
+});
+function renderBatch(data) {
+  if (data.status === "unknown") { stopPolling(); sessionStorage.removeItem("cutterBatchJob"); return; }
+  $("batchPanel").open = true;
+  $("batchMessage").textContent = data.message || "Na fila...";
+  pctEl.textContent = data.message || "Processando...";
+  fillEl.style.width = (data.progress || 0) + "%";
+  const container = $("batchResults"); container.replaceChildren();
+  const labels = {queued:"Aguardando", running:"Processando", done:"Pronto", error:"Erro"};
+  for (const item of data.items || []) {
+    const row = document.createElement("div"); row.className = "batch-item";
+    const text = document.createElement("div");
+    text.textContent = `${labels[item.status] || item.status} · ${item.source}` + (item.error ? "\n"+item.error : "");
+    row.append(text);
+    for (const [idx, out] of (item.outputs || []).entries()) {
+      for (const [key, label, endpoint] of [["txt_path","Abrir TXT","/api/open"],["srt_path","Mostrar SRT","/api/reveal"],["file_path","Mostrar mídia","/api/reveal"]]) {
+        if (!out[key]) continue;
+        const b=document.createElement("button"); b.textContent = label + (item.outputs.length>1 ? ` ${idx+1}` : "");
+        b.onclick = () => post(endpoint,{path:out[key]}); row.append(b);
+      }
+    }
+    container.append(row);
+  }
+  if (data.status === "done" || data.status === "error") {
+    stopPolling(); sessionStorage.removeItem("cutterBatchJob");
+    $("batchStart").disabled = false; showOnly(null);
+  }
+}
+// Pasting several links into the original field also opens the batch queue.
+urlEl.addEventListener("paste", e => {
+  const entries = (e.clipboardData.getData("text") || "").split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  if(entries.length>1) { e.preventDefault(); stageBatch(entries); }
+});
+const previousBatch = sessionStorage.getItem("cutterBatchJob");
+if (previousBatch) {
+  currentJobId=previousBatch; showOnly(statusEl); $("batchStart").disabled=true;
+  polling=setInterval(pollProgress,700);
 }
 
 document.addEventListener("dragover", (e) => {
