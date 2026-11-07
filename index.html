@@ -419,6 +419,7 @@
       </div>
       <button class="btn ghost" id="openTxt" style="margin-top:10px">Abrir transcricao</button>
       <button class="btn ghost" id="openSrt" style="margin-top:10px">Mostrar legenda no Finder</button>
+      <button class="btn ghost" id="openCenas" style="margin-top:10px">Abrir descricao das cenas</button>
       <button class="btn ghost" id="newOne" style="margin-top:10px">Novo download</button>
     </div>
 
@@ -442,6 +443,13 @@
       <label for="cfgCookies">Cookies do navegador</label>
       <select id="cfgCookies"></select>
       <div class="hint">Escolha um navegador em que voce esteja logado no site (YouTube, Instagram, TikTok, X...) para baixar stories, posts que exigem login, videos com restricao de idade ou quando o YouTube pedir "confirme que voce nao e um robo".</div>
+    </div>
+    <div class="field">
+      <label>Descricao de cena (IA local)</label>
+      <label class="toggle"><input type="checkbox" id="cfgDescribe"> Descrever as cenas ao gerar transcricao</label>
+      <div class="hint" id="descHint">Para videos sem fala e sem texto na tela, descreve o que aparece (pessoas, objetos, ambiente) num arquivo <code>.cenas.txt</code>. Roda no seu Mac, offline.</div>
+      <button type="button" class="btn ghost" id="vlmInstall" style="margin-top:8px; display:none">Instalar descricao de cena (~2,9 GB)</button>
+      <div class="hint" id="vlmMsg" style="display:none"></div>
     </div>
     <div class="msg" id="cfgMsg"></div>
     <div class="btn-row">
@@ -512,10 +520,11 @@ outPills.querySelectorAll("button").forEach(b => b.addEventListener("click", () 
 audioFormatEl.addEventListener("change", () => { store.set("audioFormat", audioFormatEl.value); applyOutput(currentMode()); });
 audioBitrateEl.addEventListener("change", () => store.set("audioBitrate", audioBitrateEl.value));
 const srtEl = $("srt");
-let doneSrtPath = null;
+let doneSrtPath = null, doneCenasPath = null;
 srtEl.checked = store.get("srt", "0") === "1";
 srtEl.addEventListener("change", () => store.set("srt", srtEl.checked ? "1" : "0"));
 $("openSrt").addEventListener("click", () => doneSrtPath && post("/api/reveal", { path: doneSrtPath }));
+$("openCenas").addEventListener("click", () => doneCenasPath && post("/api/open", { path: doneCenasPath }));
 const effectiveOut = (mode) => mode === "record" ? "video" : outMode;
 function applyOutput(mode) {
   const out = effectiveOut(mode);
@@ -761,6 +770,9 @@ async function pollProgress() {
       $("openSrt").style.display = doneSrtPath ? "block" : "none";
       if (doneSrtPath) donePath.textContent += "\n" + doneSrtPath;
       $("openTxt").style.display = doneTxtPath ? "block" : "none";
+      doneCenasPath = data.cenas_path || null;
+      $("openCenas").style.display = doneCenasPath ? "block" : "none";
+      if (doneCenasPath) donePath.textContent += "\n" + doneCenasPath;
       $("doneNote").textContent = data.transcript_error ? "Transcricao: " + data.transcript_error : "";
       showOnly(doneEl);
     } else if (data.status === "error") {
@@ -925,6 +937,8 @@ async function loadConfig() {
     cfgCookies.value = cfg.cookies_browser || "";
     hasWhisper = cfg.whisper !== false;
     updateTrHint();
+    cfgDescribe.checked = !!cfg.describe_scenes;
+    applyVlmState(cfg.vlm_ready, cfg.python312);
     const banner = $("depBanner");
     if (cfg.missing && cfg.missing.length) {
       banner.innerHTML = "";
@@ -955,7 +969,7 @@ $("settingsLink").addEventListener("click", () => {
 $("cfgClose").addEventListener("click", () => settingsEl.classList.remove("show"));
 $("cfgSave").addEventListener("click", async () => {
   try {
-    const r = await post("/api/config", { download_dir: cfgDir.value.trim(), cookies_browser: cfgCookies.value });
+    const r = await post("/api/config", { download_dir: cfgDir.value.trim(), cookies_browser: cfgCookies.value, describe_scenes: cfgDescribe.checked });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "Nao foi possivel salvar");
     cfgDir.value = data.download_dir;
@@ -965,6 +979,38 @@ $("cfgSave").addEventListener("click", async () => {
   } catch (e) {
     cfgMsg.textContent = e.message; cfgMsg.className = "msg err";
   }
+});
+
+// --- Descricao de cena (IA local): estado e instalacao ---
+const cfgDescribe = $("cfgDescribe"), vlmInstall = $("vlmInstall"), vlmMsg = $("vlmMsg");
+let vlmInstalling = false;
+function applyVlmState(ready, hasPy) {
+  if (vlmInstalling) return;
+  if (ready) {
+    vlmInstall.style.display = "none";
+    vlmMsg.style.display = "block"; vlmMsg.textContent = "Instalado.";
+  } else if (!hasPy) {
+    vlmInstall.style.display = "none";
+    vlmMsg.style.display = "block"; vlmMsg.textContent = "Precisa do Python 3.12. No Terminal: brew install python@3.12";
+  } else {
+    vlmInstall.style.display = "block";
+    vlmMsg.style.display = "none";
+  }
+}
+vlmInstall.addEventListener("click", async () => {
+  vlmInstalling = true;
+  vlmInstall.style.display = "none";
+  vlmMsg.style.display = "block"; vlmMsg.textContent = "Iniciando...";
+  try {
+    const data = await (await post("/api/vlm-install")).json();
+    if (data.ready) { vlmInstalling = false; return applyVlmState(true, true); }
+    const timer = setInterval(async () => {
+      const p = await (await fetch(`/api/progress/${data.job_id}`)).json();
+      vlmMsg.textContent = p.message || "Instalando...";
+      if (p.status === "done") { clearInterval(timer); vlmInstalling = false; applyVlmState(true, true); }
+      else if (p.status === "error") { clearInterval(timer); vlmInstalling = false; vlmMsg.textContent = p.error || "Falhou"; vlmInstall.style.display = "block"; }
+    }, 1000);
+  } catch (e) { vlmInstalling = false; vlmMsg.textContent = e.message; vlmInstall.style.display = "block"; }
 });
 
 loadConfig();

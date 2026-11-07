@@ -18,6 +18,7 @@ done
 lipo -create "$TMPBIN/ocr-arm64" "$TMPBIN/ocr-x86_64" -output "$APP/Contents/Resources/cutter-ocr"
 cp mac/Info.plist "$APP/Contents/Info.plist"
 cp app.py index.html "$APP/Contents/Resources/"
+cp -R vlm "$APP/Contents/Resources/"   # motor de descricao de cena (roda no venv instalado sob demanda)
 if command -v rsvg-convert >/dev/null && command -v iconutil >/dev/null; then
   ICONSET="$(mktemp -d)/AppIcon.iconset"
   mkdir -p "$ICONSET"

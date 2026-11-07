@@ -23,7 +23,25 @@ COOKIE_BROWSERS = ["", "firefox", "chrome", "safari", "brave", "edge", "chromium
 DEFAULT_CONFIG = {
     "download_dir": str(Path.home() / "Downloads"),
     "cookies_browser": "",  # vazio = sem cookies
+    "describe_scenes": False,  # descrever as cenas (IA de visao local) ao gerar transcricao
 }
+
+# Descricao de cena: modelo de visao local (MLX), instalado sob demanda nos Ajustes.
+VLM_DIR = CONFIG_PATH.parent / "vlm"
+VLM_VENV = VLM_DIR / "venv"
+VLM_PY = VLM_VENV / "bin" / "python"
+VLM_HF = VLM_DIR / "hf"
+VLM_READY = VLM_DIR / "ready"
+VLM_MODEL = "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"
+
+
+def vlm_ready():
+    return VLM_PY.exists() and VLM_READY.exists()
+
+
+def python312():
+    return shutil.which("python3.12") or next(
+        (p for p in ("/opt/homebrew/bin/python3.12", "/usr/local/bin/python3.12") if os.path.exists(p)), None)
 
 
 def load_config():
@@ -1270,13 +1288,117 @@ def speech_or_ocr(job_id, media, label=""):
     return srt, txt, "texto da tela (OCR)"
 
 
+def describe_frames(job_id, media, label=""):
+    """Descreve as cenas do video com um modelo de visao local. -> (srt, txt com [tempo] por cena)."""
+    if not vlm_ready():
+        raise RuntimeError("A descricao de cena nao esta instalada. Ligue e instale em Ajustes.")
+    script = APP_DIR / "vlm" / "describe.py"
+    if not script.exists():
+        raise RuntimeError("Falta o motor de descricao no app. Recompile o Cutter.")
+    dur = media_duration(media) or 0
+    # ate ~40 quadros, um a cada 'step' s (minimo 5 s): segura o tempo de processamento
+    n = 40 if dur > 600 else max(6, int(dur // 10) or 6)
+    step = max(5, round(dur / n)) if dur else 10
+    tmp = Path(tempfile.mkdtemp(prefix="cutter-vlm-"))
+    try:
+        set_job(job_id, progress=0, message=f"Separando os quadros do video{label}...")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(media),
+                        "-vf", f"fps=1/{step},scale=512:-2", "-q:v", "4", str(tmp / "f%05d.jpg")],
+                       capture_output=True, text=True)
+        frames = sorted(tmp.glob("f*.jpg"))
+        if not frames:
+            raise RuntimeError("Nao consegui extrair quadros do video.")
+        env = dict(os.environ, HF_HOME=str(VLM_HF), HF_HUB_OFFLINE="1", CUTTER_VLM_MODEL=VLM_MODEL)
+        proc = subprocess.Popen([str(VLM_PY), str(script), *[str(f) for f in frames]],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
+        desc, cur, done = {}, None, 0
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if line.startswith("\x01VLM\x01"):
+                cur = line[len("\x01VLM\x01"):]
+                desc[cur] = ""
+                done += 1
+                set_job(job_id, progress=10 + 85 * done / len(frames),
+                        message=f"Descrevendo as cenas{label}... {done}/{len(frames)}")
+            elif cur is not None and line.strip():
+                desc[cur] = line.strip()
+        proc.wait()
+        cues = []  # junta cenas seguidas com a mesma descricao
+        for i, f in enumerate(frames):
+            d = desc.get(str(f), "").strip()
+            if not d:
+                continue
+            t = i * step
+            if cues and _similar_text(d, cues[-1][2]):
+                b, _, prev = cues[-1]
+                cues[-1] = (b, t + step, prev if len(prev) >= len(d) else d)
+            else:
+                cues.append((t, t + step, d))
+        if not cues:
+            return "", ""
+        srt = "\n".join(f"{i + 1}\n{srt_time(b)} --> {srt_time(e)}\n{tx}\n"
+                        for i, (b, e, tx) in enumerate(cues))
+        txt = "\n".join(f"[{seconds_to_hhmmss(b)}] {tx}" for b, _, tx in cues)
+        return srt, txt
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def maybe_describe(job_id, media, label=""):
+    """Se ligado nos Ajustes e instalado, salva <arquivo>.cenas.txt e .cenas.srt. -> caminho .txt ou None."""
+    if not load_config().get("describe_scenes") or not vlm_ready():
+        return None
+    media = Path(media)
+    try:
+        srt, txt = describe_frames(job_id, media, label)
+    except Exception:
+        return None
+    if not txt.strip():
+        return None
+    ct, cs = media.with_suffix(".cenas.txt"), media.with_suffix(".cenas.srt")
+    ct.write_text(txt + "\n", encoding="utf-8")
+    cs.write_text(srt + "\n", encoding="utf-8")
+    return str(ct)
+
+
+def vlm_install_job(job_id):
+    """Cria o ambiente Python 3.12, instala o mlx-vlm e baixa o modelo de visao."""
+    try:
+        py = python312()
+        if not py:
+            raise RuntimeError("Preciso do Python 3.12. No Terminal: brew install python@3.12")
+        VLM_DIR.mkdir(parents=True, exist_ok=True)
+        if not VLM_PY.exists():
+            set_job(job_id, status="running", progress=5, message="Criando o ambiente...")
+            r = subprocess.run([py, "-m", "venv", str(VLM_VENV)], capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError("Falha ao criar o ambiente:\n" + (r.stderr or "")[-500:])
+        set_job(job_id, status="running", progress=15, message="Instalando o mlx-vlm (pode demorar alguns minutos)...")
+        r = subprocess.run([str(VLM_PY), "-m", "pip", "install", "-q", "--upgrade", "pip", "mlx-vlm"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError("Falha ao instalar o mlx-vlm:\n" + (r.stderr or "")[-800:])
+        set_job(job_id, status="running", progress=45,
+                message="Baixando o modelo de visao (~2,9 GB, so na primeira vez)...")
+        env = dict(os.environ, HF_HOME=str(VLM_HF))
+        r = subprocess.run([str(VLM_PY), "-c",
+                            f"from huggingface_hub import snapshot_download; snapshot_download('{VLM_MODEL}')"],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            raise RuntimeError("Falha ao baixar o modelo:\n" + (r.stderr or "")[-800:])
+        VLM_READY.write_text("ok")
+        set_job(job_id, status="done", progress=100, message="Descricao de cena instalada.")
+    except Exception as e:
+        set_job(job_id, status="error", error=str(e))
+
+
 def transcribe_files_job(job_id, paths):
     """Arquivo ja baixado (arrastado pro app ou escolhido): gera <arquivo>.srt e <arquivo>.txt ao lado dele."""
     if not whisper_bin() and not ocr_bin():
         set_job(job_id, status="error", error="Para gerar legenda de um arquivo, instale o Whisper. "
                                               "No Terminal: brew install whisper-cpp")
         return
-    done, errors, sources = [], [], []
+    done, errors, sources, cenas = [], [], [], []
     for i, media in enumerate(paths):
         media = Path(media)
         label = f" ({i + 1}/{len(paths)}: {media.name})" if len(paths) > 1 else ""
@@ -1287,6 +1409,9 @@ def transcribe_files_job(job_id, paths):
             txt_path.write_text(txt + "\n", encoding="utf-8")
             done.append((media, txt_path, srt_path))
             sources.append(source)
+            cp = maybe_describe(job_id, media, label)
+            if cp:
+                cenas.append(cp)
         except Exception as e:
             errors.append(f"{media.name}: {e}" if len(paths) > 1 else str(e))
     if not done:
@@ -1294,14 +1419,17 @@ def transcribe_files_job(job_id, paths):
         return
     media, txt_path, srt_path = done[0]
     extra = " · texto da tela (OCR)" if all("OCR" in s for s in sources) else ""
+    if cenas:
+        extra += " · descricao de cena"
     msg = ("Legenda pronta" if len(done) == 1 else f"Legendas prontas ({len(done)} arquivos)") + extra
     set_job(job_id, status="done", progress=100, message=msg, file_path=str(media), txt_path=str(txt_path),
-            srt_path=str(srt_path), transcript_error="\n".join(errors), local=True)
+            srt_path=str(srt_path), cenas_path=cenas[0] if cenas else "",
+            transcript_error="\n".join(errors), local=True)
 
 
 def subtitles_job(job_id, client, url, files, start_s, end_s, use_subs, want_txt, done_msg):
     """Gera <arquivo>.srt (e o .txt, se pedido) ao lado de cada arquivo baixado."""
-    srts, txts, notes = [], [], []
+    srts, txts, notes, cenas = [], [], [], []
     for i, media in enumerate(files):
         media = Path(media)
         label = f" ({i + 1}/{len(files)})" if len(files) > 1 else ""
@@ -1325,14 +1453,20 @@ def subtitles_job(job_id, client, url, files, start_s, end_s, use_subs, want_txt
                 t.write_text(txt + "\n", encoding="utf-8")
                 txts.append(t)
             notes.append(source)
+            cp = maybe_describe(job_id, media, label)
+            if cp:
+                cenas.append(cp)
         except Exception as e:
             notes.append(f"erro: {e}")
     how = ", ".join(sorted(set(n for n in notes if not n.startswith("erro"))))
     what = "legenda e transcricao" if want_txt else "legenda"
     msg = f"{done_msg} · {what} via {how}" if srts else f"{done_msg} · legenda nao gerada"
+    if cenas:
+        msg += " · descricao de cena"
     errors = [n[6:] for n in notes if n.startswith("erro")]
     set_job(job_id, status="done", progress=100, message=msg, srt_path=str(srts[0]) if srts else "",
-            txt_path=str(txts[0]) if txts else "", transcript_error="\n".join(errors))
+            txt_path=str(txts[0]) if txts else "", cenas_path=cenas[0] if cenas else "",
+            transcript_error="\n".join(errors))
 
 
 def run_with_subtitles(job_id, url, start_s, end_s, info, height, mode, output, fmt, bitrate, want_txt):
@@ -1509,7 +1643,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._json(200, get_job(job_id) or {"status": "unknown"})
         elif path == "/api/config":
             self._json(200, {**load_config(), "browsers": COOKIE_BROWSERS,
-                             "missing": missing_dependencies(), "whisper": bool(whisper_bin())})
+                             "missing": missing_dependencies(), "whisper": bool(whisper_bin()),
+                             "vlm_ready": vlm_ready(), "python312": bool(python312())})
         elif path.startswith("/api/stop/"):
             job_id = path.rsplit("/", 1)[-1]
             self._json(200, {"ok": stop_recording(job_id)})
@@ -1647,8 +1782,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     cfg["download_dir"] = d
                 if data.get("cookies_browser", cfg["cookies_browser"]) in COOKIE_BROWSERS:
                     cfg["cookies_browser"] = data.get("cookies_browser", cfg["cookies_browser"])
+                if "describe_scenes" in data:
+                    cfg["describe_scenes"] = bool(data["describe_scenes"])
                 save_config(cfg)
                 self._json(200, cfg)
+            elif path == "/api/vlm-install":
+                origin = self.headers.get("Origin", "")
+                if origin and urlparse(origin).hostname not in ("localhost", "127.0.0.1"):
+                    return self._json(403, {"error": "Origem nao permitida"})
+                if vlm_ready():
+                    return self._json(200, {"job_id": "", "ready": True})
+                job_id = uuid.uuid4().hex[:12]
+                set_job(job_id, status="queued", progress=0, message="Iniciando...")
+                threading.Thread(target=vlm_install_job, args=(job_id,), daemon=True).start()
+                self._json(200, {"job_id": job_id})
             elif path == "/api/transcribe-file":
                 # So a pagina do proprio Cutter pode pedir (outro site aberto no navegador nao).
                 origin = self.headers.get("Origin", "")

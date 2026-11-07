@@ -12,6 +12,7 @@ App para macOS que baixa vídeos do YouTube, Instagram, TikTok, X/Twitter, Faceb
 - **Trecho** — informe início e fim (`HH:MM:SS`) e baixa só aquele pedaço; funciona em vídeos, lives encerradas e lives em andamento.
 - **Gravar ao vivo** (só YouTube) — grava a live a partir de agora **ou voltando 5, 10, 30 ou 60 minutos**, e continua até você parar ou a live acabar. Útil para quando você só percebe que precisava gravar depois que a parte importante já começou (sessões legislativas, palestras, eventos).
 - **Transcrição (.txt)** — marque "Gerar transcrição" e o Cutter salva um `.txt` de texto puro ao lado do vídeo, com o mesmo nome. Usa a legenda do próprio site (manual, depois automática, no idioma original); sem legenda (comum no Instagram e no TikTok), transcreve no Mac com o [whisper.cpp](https://github.com/ggml-org/whisper.cpp), detectando o idioma. Se o vídeo **não tiver fala** (slides, tutoriais, aulas com texto na tela), o Cutter separa os quadros e **lê o texto que aparece neles** (OCR do macOS, offline, sem precisar do Whisper). Funciona também para trechos.
+- **Descrição de cena (IA local)** — opcional, em Ajustes. Para vídeos sem fala e sem texto na tela, descreve o que aparece (pessoas, objetos, ambiente) num arquivo `.cenas.txt` (e `.srt`), com o horário de cada cena. Roda no seu Mac, offline, com um modelo de visão ([Qwen2.5-VL via MLX](https://github.com/Blaizzy/mlx-vlm)). Precisa instalar uma vez pelo botão em Ajustes: cria um ambiente Python 3.12 e baixa o modelo (~2,9 GB) em `~/Library/Application Support/Cutter/vlm`. É mais lento que o resto (alguns segundos por quadro).
 - **Legenda (.srt)** — marque "Gerar legenda" e o Cutter salva um `.srt` com tempos ao lado do arquivo, com o mesmo nome (abre junto no VLC/IINA e importa em editores de vídeo). Usa a legenda do site, ajustada ao trecho recortado; sem legenda, gera com o Whisper. Funciona junto com a transcrição `.txt` e com os formatos de áudio.
 - **Legenda de arquivo já baixado** — arraste um vídeo ou áudio do Mac para a janela do Cutter (ou clique em **Escolher arquivo**, ou cole o caminho do arquivo no campo de link) e ele gera o `.srt` e o `.txt` ao lado do arquivo, com o Whisper. Aceita vários arquivos de uma vez.
 - Escolha de qualidade (360p a 4K), com preferência por H.264/AAC para abrir em qualquer player/editor.
@@ -31,6 +32,8 @@ brew install yt-dlp ffmpeg
 ```
 
 Opcional, para transcrever vídeos sem legenda: `brew install whisper-cpp`. Na primeira transcrição o Cutter baixa o modelo `large-v3-turbo` (~550 MB) para `~/Library/Application Support/Cutter/models`.
+
+Opcional, para a descrição de cena: `brew install python@3.12` (o resto — ambiente e modelo — o Cutter instala pelo botão em Ajustes).
 
 Opcional, para o ícone ser gerado a partir do `icon.svg` no build: `brew install librsvg`.
 
