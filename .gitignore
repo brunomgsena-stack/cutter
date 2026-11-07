@@ -17,3 +17,6 @@ __pycache__/
 config.json
 *.cookies
 cookies.txt
+
+# binario de OCR compilado para desenvolvimento (o build gera o oficial no app)
+/cutter-ocr

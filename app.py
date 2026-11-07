@@ -52,6 +52,12 @@ def missing_dependencies():
     return [tool for tool in ("yt-dlp", "ffmpeg") if not shutil.which(tool)]
 
 
+def ocr_bin():
+    """Leitor de texto de imagem (Vision da Apple), compilado junto com o app."""
+    p = APP_DIR / "cutter-ocr"
+    return str(p) if p.exists() else None
+
+
 def whisper_bin():
     """whisper.cpp (brew install whisper-cpp). O app aberto pelo Finder nao herda o PATH do shell."""
     return shutil.which("whisper-cli") or next(
@@ -1188,31 +1194,107 @@ def whisper_srt(job_id, media, label=""):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _norm_ocr(t):
+    return re.sub(r"\s+", " ", t).strip().lower()
+
+
+def _similar_text(a, b):
+    """Quadros de slide iguais/quase iguais (so muda uma letra do OCR) contam como o mesmo bloco."""
+    import difflib
+    na, nb = _norm_ocr(a), _norm_ocr(b)
+    if not na or not nb:
+        return na == nb
+    return difflib.SequenceMatcher(None, na, nb).ratio() > 0.85
+
+
+def ocr_frames(job_id, media, label=""):
+    """Video sem fala: tira quadros de tempos em tempos e le o texto na tela (OCR). -> (srt, txt)."""
+    exe = ocr_bin()
+    if not exe:
+        raise RuntimeError("Nao consigo ler o texto da tela: o leitor de OCR nao veio neste Cutter. "
+                           "Recompile o app (mac/build.sh).")
+    dur = media_duration(media) or 0
+    step = 2 if dur <= 600 else max(2, round(dur / 300))  # ~1 quadro a cada 'step' s, ate ~300 quadros
+    tmp = Path(tempfile.mkdtemp(prefix="cutter-ocr-"))
+    try:
+        set_job(job_id, progress=0, message=f"Separando os quadros do video{label}...")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(media),
+                        "-vf", f"fps=1/{step}", "-q:v", "3", str(tmp / "f%05d.jpg")],
+                       capture_output=True, text=True)
+        frames = sorted(tmp.glob("f*.jpg"))
+        if not frames:
+            raise RuntimeError("Nao consegui extrair quadros do video.")
+        set_job(job_id, progress=40, message=f"Lendo o texto dos quadros{label}... ({len(frames)})")
+        out = subprocess.run([exe, *[str(f) for f in frames]], capture_output=True, text=True, timeout=1800)
+        by_frame, cur = {}, None
+        for line in out.stdout.split("\n"):
+            if line.startswith("\x01OCR\x01"):
+                cur = line[len("\x01OCR\x01"):]
+                by_frame[cur] = []
+            elif cur is not None and line.strip():
+                by_frame[cur].append(line)
+        cues = []  # (inicio_s, fim_s, texto) - junta quadros seguidos com o mesmo texto
+        for i, f in enumerate(frames):
+            block = "\n".join(by_frame.get(str(f), [])).strip()
+            if not block:
+                continue
+            t = i * step
+            if cues and _similar_text(block, cues[-1][2]):
+                b, _, prev = cues[-1]
+                cues[-1] = (b, t + step, prev if len(prev) >= len(block) else block)
+            else:
+                cues.append((t, t + step, block))
+        if not cues:
+            return "", ""
+        srt = "\n".join(f"{i + 1}\n{srt_time(b)} --> {srt_time(e)}\n{tx}\n"
+                        for i, (b, e, tx) in enumerate(cues))
+        txt = "\n\n".join(tx for _, _, tx in cues)
+        return srt, txt
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def speech_or_ocr(job_id, media, label=""):
+    """Tenta a fala (Whisper); sem fala ou sem audio, le o texto na tela (OCR). -> (srt, txt, fonte)."""
+    try:
+        srt, txt = whisper_srt(job_id, media, label)
+        if srt.strip():
+            return srt, txt, "Whisper"
+    except RuntimeError as e:
+        msg = str(e)
+        if "nao tem audio" not in msg and "nao esta instalado" not in msg:
+            raise  # erro real do Whisper (ffmpeg, etc.): nao mascara com OCR
+    srt, txt = ocr_frames(job_id, media, label)
+    if not srt.strip():
+        raise RuntimeError("Sem fala no audio e sem texto reconhecido nos quadros do video.")
+    return srt, txt, "texto da tela (OCR)"
+
+
 def transcribe_files_job(job_id, paths):
     """Arquivo ja baixado (arrastado pro app ou escolhido): gera <arquivo>.srt e <arquivo>.txt ao lado dele."""
-    if not whisper_bin():
+    if not whisper_bin() and not ocr_bin():
         set_job(job_id, status="error", error="Para gerar legenda de um arquivo, instale o Whisper. "
                                               "No Terminal: brew install whisper-cpp")
         return
-    done, errors = [], []
+    done, errors, sources = [], [], []
     for i, media in enumerate(paths):
         media = Path(media)
         label = f" ({i + 1}/{len(paths)}: {media.name})" if len(paths) > 1 else ""
         try:
-            srt, txt = whisper_srt(job_id, media, label)
-            if not srt.strip():
-                raise RuntimeError("Nenhuma fala reconhecida no audio.")
+            srt, txt, source = speech_or_ocr(job_id, media, label)
             srt_path, txt_path = media.with_suffix(".srt"), media.with_suffix(".txt")
             srt_path.write_text(srt, encoding="utf-8")
             txt_path.write_text(txt + "\n", encoding="utf-8")
             done.append((media, txt_path, srt_path))
+            sources.append(source)
         except Exception as e:
             errors.append(f"{media.name}: {e}" if len(paths) > 1 else str(e))
     if not done:
         set_job(job_id, status="error", error="\n\n".join(errors) or "Falha ao gerar a legenda")
         return
     media, txt_path, srt_path = done[0]
-    msg = "Legenda pronta" if len(done) == 1 else f"Legendas prontas ({len(done)} arquivos)"
+    extra = " · texto da tela (OCR)" if all("OCR" in s for s in sources) else ""
+    msg = ("Legenda pronta" if len(done) == 1 else f"Legendas prontas ({len(done)} arquivos)") + extra
     set_job(job_id, status="done", progress=100, message=msg, file_path=str(media), txt_path=str(txt_path),
             srt_path=str(srt_path), transcript_error="\n".join(errors), local=True)
 
@@ -1234,10 +1316,7 @@ def subtitles_job(job_id, client, url, files, start_s, end_s, use_subs, want_txt
                     txt = vtt_to_text(vtt, start_s, end_s) or None
                     source = "legendas do site"
             if not srt:
-                srt, txt = whisper_srt(job_id, media, label)
-                source = "Whisper"
-            if not srt:
-                raise RuntimeError("Nenhuma fala reconhecida no audio.")
+                srt, txt, source = speech_or_ocr(job_id, media, label)
             out = media.with_suffix(".srt")
             out.write_text(srt + "\n", encoding="utf-8")
             srts.append(out)

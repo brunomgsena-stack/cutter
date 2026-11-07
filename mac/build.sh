@@ -11,6 +11,11 @@ for arch in arm64 x86_64; do
   swiftc -O -target "$arch-apple-macos11.0" -o "$TMPBIN/Cutter-$arch" mac/main.swift -framework AppKit -framework WebKit
 done
 lipo -create "$TMPBIN/Cutter-arm64" "$TMPBIN/Cutter-x86_64" -output "$APP/Contents/MacOS/Cutter"
+# leitor de OCR (Vision da Apple), usado para "ler a tela" de videos sem fala
+for arch in arm64 x86_64; do
+  swiftc -O -target "$arch-apple-macos11.0" -o "$TMPBIN/ocr-$arch" mac/ocr.swift -framework Vision -framework AppKit
+done
+lipo -create "$TMPBIN/ocr-arm64" "$TMPBIN/ocr-x86_64" -output "$APP/Contents/Resources/cutter-ocr"
 cp mac/Info.plist "$APP/Contents/Info.plist"
 cp app.py index.html "$APP/Contents/Resources/"
 if command -v rsvg-convert >/dev/null && command -v iconutil >/dev/null; then
@@ -24,6 +29,9 @@ if command -v rsvg-convert >/dev/null && command -v iconutil >/dev/null; then
 else
   cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 fi
+# o cutter-ocr e um executavel dentro de Resources: assina ele primeiro, depois o app todo,
+# senao o selo do pacote fica invalido ("sealed resource is missing or invalid").
+codesign --force --sign - "$APP/Contents/Resources/cutter-ocr" 2>/dev/null
 codesign --force --sign - "$APP" 2>/dev/null
 echo "OK: $APP"
 
